@@ -52,9 +52,10 @@ Current state:
   `tun_interface_destination`, and `tun_device_fd_from_path`. The relay layer
   now has an explicit tun dispatch path plus IPv4/IPv6 UDP packet
   parse/synthesis helpers, a Shadowsocks UDP association bridge, and Linux
-  `/dev/net/tun` open/read/write plumbing through libuv readiness waits. The
-  complete runtime tun packet loop and virtual TCP state machine are still
-  remaining work.
+  `/dev/net/tun` open/read/write plumbing through libuv readiness waits. Linux
+  tun UDP packets are read from the device, encrypted to the selected
+  Shadowsocks server, and server replies are written back as synthesized IP
+  packets. The virtual TCP state machine is still remaining work.
 - TCP `ss-server` path for supported ciphers.
 - UDP `ss-local` SOCKS5 UDP ASSOCIATE path for supported ciphers.
 - UDP `ss-server` path for supported ciphers.
@@ -265,6 +266,6 @@ Latest libuv/Zig 0.16 smoke checks:
 Remaining high-level port work:
 
 - Remaining specialized local protocol work from shadowsocks-rust/libev:
-  virtual TCP/IP forwarding for tun local mode, macOS/iOS/Windows tun device
+  virtual TCP forwarding for tun local mode, macOS/iOS/Windows tun device
   wiring, plus full BSD/macOS pf/ipfw integration tests with kernel rules and
   tun interfaces.

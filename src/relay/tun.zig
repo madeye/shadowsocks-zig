@@ -95,16 +95,7 @@ pub const Device = struct {
     }
 
     pub fn writeAll(self: *Device, packet: []const u8) !void {
-        var offset: usize = 0;
-        while (offset < packet.len) {
-            if (!try libuv.waitWritable(self.fd, infinite_timeout_ms)) continue;
-            const written = writeFd(self.fd, packet[offset..]) catch |err| switch (err) {
-                error.WouldBlock => continue,
-                else => |e| return e,
-            };
-            if (written == 0) return error.DeviceClosed;
-            offset += written;
-        }
+        try writeAllFd(self.fd, packet);
     }
 
     pub fn nameSlice(self: *const Device) []const u8 {
@@ -222,6 +213,21 @@ pub const UdpAssociation = struct {
     }
 };
 
+const RuntimeUdpAssociation = struct {
+    udp: UdpAssociation,
+    remote_socket: netio.UdpSocket,
+    server_addr: net.IpAddress,
+    tun_fd: std.posix.fd_t,
+    timeout_ns: i64,
+    last_seen_ns: std.atomic.Value(i64),
+    closed: std.atomic.Value(bool) = .init(false),
+
+    fn deinit(self: *RuntimeUdpAssociation) void {
+        self.udp.deinit();
+        self.* = undefined;
+    }
+};
+
 pub fn runLocal(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -236,11 +242,7 @@ pub fn runLocal(
     fake_dns_manager: ?*fake_dns.Manager,
 ) !void {
     _ = tcp_servers;
-    _ = udp_servers;
     _ = tcp_next;
-    _ = udp_next;
-    _ = udp_timeout_seconds;
-    _ = udp_max_associations;
     _ = access_control;
     _ = fake_dns_manager;
 
@@ -249,20 +251,179 @@ pub fn runLocal(
             if (local_cfg.tun_device_fd_from_path != null) return error.TunLocalFdHandoffNotImplemented;
             var device = try Device.open(local_cfg);
             defer device.close();
-            return try runDeviceLoop(allocator, io, &device);
+            return try runDeviceLoop(allocator, io, &device, udp_servers, udp_next, local_cfg, udp_timeout_seconds, udp_max_associations);
         },
         .macos, .ios, .windows => error.TunLocalDeviceNotImplemented,
         else => error.TunLocalUnsupportedPlatform,
     };
 }
 
-fn runDeviceLoop(allocator: std.mem.Allocator, io: std.Io, device: *Device) !void {
-    _ = allocator;
-    _ = io;
+fn runDeviceLoop(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    device: *Device,
+    udp_servers: []const config.Server,
+    udp_next: *std.atomic.Value(usize),
+    local_cfg: config.Local,
+    udp_timeout_seconds: u64,
+    udp_max_associations: ?usize,
+) !void {
+    var udp_associations = std.AutoHashMap(u64, *RuntimeUdpAssociation).init(allocator);
+    defer {
+        var it = udp_associations.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.*.closed.store(true, .release);
+        }
+        udp_associations.deinit();
+    }
+    var retired = std.ArrayList(*RuntimeUdpAssociation).empty;
+    defer retired.deinit(allocator);
+
     var packet: [max_tun_packet_size]u8 = undefined;
-    const n = try device.read(&packet);
-    _ = try parseIpPacket(packet[0..n]);
-    return error.TunLocalPacketStackNotImplemented;
+    while (true) {
+        const n = try device.read(&packet);
+        cleanupRuntimeUdpAssociations(allocator, io, &udp_associations, &retired, udp_timeout_seconds);
+        const ip_packet = (try parseIpPacket(packet[0..n])) orelse continue;
+        switch (ip_packet.protocol) {
+            .udp => {
+                if (!local_cfg.mode.enableUdp()) continue;
+                const udp_packet = (try parseUdpPacket(packet[0..n])) orelse continue;
+                try handleTunUdpPacket(allocator, io, device, udp_servers, udp_next, udp_timeout_seconds, udp_max_associations, &udp_associations, udp_packet);
+            },
+            .tcp, .icmp, .icmpv6 => {
+                if (local_cfg.mode.enableTcp()) {
+                    continue;
+                }
+            },
+            .other => continue,
+        }
+    }
+}
+
+fn handleTunUdpPacket(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    device: *Device,
+    udp_servers: []const config.Server,
+    udp_next: *std.atomic.Value(usize),
+    udp_timeout_seconds: u64,
+    udp_max_associations: ?usize,
+    associations: *std.AutoHashMap(u64, *RuntimeUdpAssociation),
+    packet: UdpPacket,
+) !void {
+    const key = netio.addressHash(packet.source);
+    const assoc = associations.get(key) orelse blk: {
+        if (udp_max_associations) |capacity| {
+            if (associations.count() >= capacity) return;
+        }
+        const server_cfg = try selectUdpServer(udp_servers, udp_next);
+        const server_addr = try netio.resolveIp(server_cfg.host, server_cfg.port);
+        const remote_socket = try netio.openUdp(server_addr);
+        errdefer remote_socket.close();
+
+        const assoc = try allocator.create(RuntimeUdpAssociation);
+        errdefer allocator.destroy(assoc);
+        assoc.* = .{
+            .udp = try UdpAssociation.init(allocator, io, server_cfg, packet.source),
+            .remote_socket = remote_socket,
+            .server_addr = server_addr,
+            .tun_fd = device.fd,
+            .timeout_ns = timeoutNs(udp_timeout_seconds),
+            .last_seen_ns = .init(nowNs(io)),
+        };
+        errdefer assoc.udp.deinit();
+        try associations.put(key, assoc);
+
+        const thread = try std.Thread.spawn(.{}, tunUdpResponseLoop, .{assoc});
+        thread.detach();
+        break :blk assoc;
+    };
+    assoc.last_seen_ns.store(nowNs(io), .release);
+
+    const encrypted = try assoc.udp.encryptPacket(packet);
+    defer allocator.free(encrypted);
+    _ = try assoc.remote_socket.sendTo(encrypted, assoc.server_addr);
+}
+
+fn tunUdpResponseLoop(assoc: *RuntimeUdpAssociation) void {
+    var encrypted_buf: [max_tun_packet_size]u8 = undefined;
+    var packet_buf: [max_tun_packet_size]u8 = undefined;
+    while (true) {
+        if (assoc.closed.load(.acquire)) break;
+        const now = nowNs(assoc.udp.io);
+        const idle_ns = now - assoc.last_seen_ns.load(.acquire);
+        if (idle_ns >= assoc.timeout_ns) break;
+        const wait_ms: u64 = @intCast(@max(@min(@divTrunc(assoc.timeout_ns - idle_ns, std.time.ns_per_ms), 1000), 1));
+        const received = (assoc.remote_socket.receiveFromTimeout(&encrypted_buf, wait_ms) catch break) orelse continue;
+        if (!netio.eqlAddress(received.from, assoc.server_addr)) continue;
+        const packet = assoc.udp.decryptPacket(encrypted_buf[0..received.len], &packet_buf) catch continue;
+        writeAllFd(assoc.tun_fd, packet) catch break;
+    }
+    assoc.remote_socket.close();
+    assoc.closed.store(true, .release);
+}
+
+fn selectUdpServer(server_cfgs: []const config.Server, next_index: *std.atomic.Value(usize)) !config.Server {
+    if (server_cfgs.len == 0) return error.MissingServer;
+    var attempts: usize = 0;
+    while (attempts < server_cfgs.len) : (attempts += 1) {
+        const index = next_index.fetchAdd(1, .monotonic) % server_cfgs.len;
+        const server_cfg = server_cfgs[index];
+        if (server_cfg.mode.enableUdp()) return server_cfg;
+    }
+    return error.UnsupportedCipher;
+}
+
+const RuntimeRemoval = struct {
+    key: u64,
+};
+
+fn cleanupRuntimeUdpAssociations(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    associations: *std.AutoHashMap(u64, *RuntimeUdpAssociation),
+    retired: *std.ArrayList(*RuntimeUdpAssociation),
+    udp_timeout_seconds: u64,
+) void {
+    const now = nowNs(io);
+    var removals = std.ArrayList(RuntimeRemoval).empty;
+    defer removals.deinit(allocator);
+
+    var it = associations.iterator();
+    while (it.next()) |entry| {
+        const assoc = entry.value_ptr.*;
+        const expired = now - assoc.last_seen_ns.load(.acquire) >= timeoutNs(udp_timeout_seconds);
+        const closed = assoc.closed.load(.acquire);
+        if (!expired and !closed) continue;
+        if (expired) assoc.closed.store(true, .release);
+        removals.append(allocator, .{ .key = entry.key_ptr.* }) catch return;
+    }
+
+    for (removals.items) |removal| {
+        if (associations.fetchRemove(removal.key)) |removed| {
+            retired.append(allocator, removed.value) catch {};
+        }
+    }
+
+    var i: usize = 0;
+    while (i < retired.items.len) {
+        const assoc = retired.items[i];
+        if (!assoc.closed.load(.acquire)) {
+            i += 1;
+            continue;
+        }
+        assoc.deinit();
+        allocator.destroy(assoc);
+        _ = retired.swapRemove(i);
+    }
+}
+
+fn nowNs(io: std.Io) i64 {
+    return @intCast(std.Io.Clock.monotonic.now(io).toNanoseconds());
+}
+
+fn timeoutNs(seconds: u64) i64 {
+    return @intCast(seconds * std.time.ns_per_s);
 }
 
 fn openLinuxTun(name: ?[]const u8) !Device {
@@ -561,6 +722,19 @@ fn writeFd(fd: std.posix.fd_t, bytes: []const u8) !usize {
     }
 }
 
+fn writeAllFd(fd: std.posix.fd_t, packet: []const u8) !void {
+    var offset: usize = 0;
+    while (offset < packet.len) {
+        if (!try libuv.waitWritable(fd, infinite_timeout_ms)) continue;
+        const written = writeFd(fd, packet[offset..]) catch |err| switch (err) {
+            error.WouldBlock => continue,
+            else => |e| return e,
+        };
+        if (written == 0) return error.DeviceClosed;
+        offset += written;
+    }
+}
+
 fn closeFd(fd: std.posix.fd_t) void {
     while (true) {
         switch (std.posix.errno(std.posix.system.close(fd))) {
@@ -693,4 +867,23 @@ test "tun linux ifreq copies optional interface name" {
 
 test "tun linux ifreq rejects too long interface name" {
     try std.testing.expectError(error.NameTooLong, linuxIfReq("interface-name-too-long"));
+}
+
+test "tun UDP selector skips tcp-only servers" {
+    var servers = [_]config.Server{ testServerConfig(), testServerConfig() };
+    servers[0].mode = .tcp_only;
+    servers[1].mode = .tcp_and_udp;
+    servers[1].port = 8390;
+    var next = std.atomic.Value(usize).init(0);
+
+    const selected = try selectUdpServer(&servers, &next);
+    try std.testing.expectEqual(@as(u16, 8390), selected.port);
+}
+
+test "tun UDP selector rejects missing UDP-capable servers" {
+    var servers = [_]config.Server{testServerConfig()};
+    servers[0].mode = .tcp_only;
+    var next = std.atomic.Value(usize).init(0);
+
+    try std.testing.expectError(error.UnsupportedCipher, selectUdpServer(&servers, &next));
 }
