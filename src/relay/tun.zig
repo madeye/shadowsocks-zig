@@ -6,12 +6,26 @@ const ss_address = @import("../protocol/address.zig");
 const acl = @import("../security/acl.zig");
 const replay = @import("../security/replay.zig");
 const fake_dns = @import("fake_dns.zig");
+const libuv = @import("../deps/libuv.zig");
 const netio = @import("netio.zig");
 
 const net = std.Io.net;
 const ipv4_header_len = 20;
 const ipv6_header_len = 40;
 const udp_header_len = 8;
+const max_tun_packet_size = 64 * 1024;
+const infinite_timeout_ms = std.math.maxInt(u64);
+
+const linux_if_name_size = 16;
+const linux_iff_tun: c_short = 0x0001;
+const linux_iff_no_pi: c_short = 0x1000;
+const linux_tunsetiff: c_ulong = 0x400454ca;
+
+const LinuxIfReq = extern struct {
+    ifr_name: [linux_if_name_size]u8 = [_]u8{0} ** linux_if_name_size,
+    ifr_flags: c_short = 0,
+    _pad: [22]u8 = [_]u8{0} ** 22,
+};
 
 pub const IpVersion = enum {
     ipv4,
@@ -50,6 +64,52 @@ pub const UdpPacket = struct {
     source: net.IpAddress,
     destination: net.IpAddress,
     payload: []const u8,
+};
+
+pub const Device = struct {
+    fd: std.posix.fd_t,
+    name: [linux_if_name_size]u8 = [_]u8{0} ** linux_if_name_size,
+
+    pub fn open(local_cfg: config.Local) !Device {
+        return switch (builtin.os.tag) {
+            .linux => try openLinuxTun(local_cfg.tun_interface_name),
+            .macos, .ios => error.TunLocalDarwinDeviceNotImplemented,
+            .windows => error.TunLocalWindowsDeviceNotImplemented,
+            else => error.TunLocalUnsupportedPlatform,
+        };
+    }
+
+    pub fn close(self: *Device) void {
+        closeFd(self.fd);
+        self.* = undefined;
+    }
+
+    pub fn read(self: *Device, out: []u8) !usize {
+        while (true) {
+            if (!try libuv.waitReadable(self.fd, infinite_timeout_ms)) continue;
+            return readFd(self.fd, out) catch |err| switch (err) {
+                error.WouldBlock => continue,
+                else => |e| return e,
+            };
+        }
+    }
+
+    pub fn writeAll(self: *Device, packet: []const u8) !void {
+        var offset: usize = 0;
+        while (offset < packet.len) {
+            if (!try libuv.waitWritable(self.fd, infinite_timeout_ms)) continue;
+            const written = writeFd(self.fd, packet[offset..]) catch |err| switch (err) {
+                error.WouldBlock => continue,
+                else => |e| return e,
+            };
+            if (written == 0) return error.DeviceClosed;
+            offset += written;
+        }
+    }
+
+    pub fn nameSlice(self: *const Device) []const u8 {
+        return std.mem.sliceTo(&self.name, 0);
+    }
 };
 
 pub const UdpAssociation = struct {
@@ -175,22 +235,64 @@ pub fn runLocal(
     access_control: ?*const acl.AccessControl,
     fake_dns_manager: ?*fake_dns.Manager,
 ) !void {
-    _ = allocator;
-    _ = io;
     _ = tcp_servers;
     _ = udp_servers;
     _ = tcp_next;
     _ = udp_next;
-    _ = local_cfg;
     _ = udp_timeout_seconds;
     _ = udp_max_associations;
     _ = access_control;
     _ = fake_dns_manager;
 
     return switch (builtin.os.tag) {
-        .linux, .macos, .ios, .windows => error.TunLocalPacketStackNotImplemented,
+        .linux => {
+            if (local_cfg.tun_device_fd_from_path != null) return error.TunLocalFdHandoffNotImplemented;
+            var device = try Device.open(local_cfg);
+            defer device.close();
+            return try runDeviceLoop(allocator, io, &device);
+        },
+        .macos, .ios, .windows => error.TunLocalDeviceNotImplemented,
         else => error.TunLocalUnsupportedPlatform,
     };
+}
+
+fn runDeviceLoop(allocator: std.mem.Allocator, io: std.Io, device: *Device) !void {
+    _ = allocator;
+    _ = io;
+    var packet: [max_tun_packet_size]u8 = undefined;
+    const n = try device.read(&packet);
+    _ = try parseIpPacket(packet[0..n]);
+    return error.TunLocalPacketStackNotImplemented;
+}
+
+fn openLinuxTun(name: ?[]const u8) !Device {
+    var ifreq = try linuxIfReq(name);
+    const fd = try std.posix.openat(std.posix.AT.FDCWD, "/dev/net/tun", .{
+        .ACCMODE = .RDWR,
+        .NONBLOCK = true,
+        .CLOEXEC = true,
+    }, 0);
+    errdefer closeFd(fd);
+
+    switch (std.posix.errno(std.c.ioctl(fd, linux_tunsetiff, &ifreq))) {
+        .SUCCESS => {},
+        .ACCES, .PERM => return error.AccessDenied,
+        .BUSY => return error.DeviceBusy,
+        .INVAL => return error.InvalidArgument,
+        .NODEV, .NOENT, .NXIO => return error.NoDevice,
+        else => |err| return std.posix.unexpectedErrno(err),
+    }
+
+    return .{ .fd = fd, .name = ifreq.ifr_name };
+}
+
+fn linuxIfReq(name: ?[]const u8) !LinuxIfReq {
+    var ifreq = LinuxIfReq{ .ifr_flags = linux_iff_tun | linux_iff_no_pi };
+    if (name) |tun_name| {
+        if (tun_name.len >= linux_if_name_size) return error.NameTooLong;
+        @memcpy(ifreq.ifr_name[0..tun_name.len], tun_name);
+    }
+    return ifreq;
 }
 
 pub fn parseIpPacket(packet: []const u8) !?IpPacket {
@@ -433,6 +535,42 @@ fn randomNonZeroU64(io: std.Io) !u64 {
     }
 }
 
+fn readFd(fd: std.posix.fd_t, out: []u8) !usize {
+    return std.posix.read(fd, out) catch |err| switch (err) {
+        error.WouldBlock => error.WouldBlock,
+        error.InputOutput => error.InputOutput,
+        else => |e| e,
+    };
+}
+
+fn writeFd(fd: std.posix.fd_t, bytes: []const u8) !usize {
+    if (bytes.len == 0) return 0;
+    while (true) {
+        const rc = std.posix.system.write(fd, bytes.ptr, bytes.len);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .INTR => continue,
+            .AGAIN => return error.WouldBlock,
+            .BADF => return error.DeviceClosed,
+            .IO => return error.InputOutput,
+            .NOBUFS, .NOMEM => return error.SystemResources,
+            .NOSPC => return error.NoSpaceLeft,
+            .PIPE => return error.BrokenPipe,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    }
+}
+
+fn closeFd(fd: std.posix.fd_t) void {
+    while (true) {
+        switch (std.posix.errno(std.posix.system.close(fd))) {
+            .SUCCESS => return,
+            .INTR => continue,
+            else => return,
+        }
+    }
+}
+
 fn testServerConfig() config.Server {
     return .{
         .host = "127.0.0.1",
@@ -545,4 +683,14 @@ test "tun UDP association synthesizes inbound response packet" {
     try std.testing.expectEqual(target, udp_packet.source);
     try std.testing.expectEqual(client, udp_packet.destination);
     try std.testing.expectEqualStrings("answer", udp_packet.payload);
+}
+
+test "tun linux ifreq copies optional interface name" {
+    const ifreq = try linuxIfReq("tun123");
+    try std.testing.expectEqual(@as(c_short, linux_iff_tun | linux_iff_no_pi), ifreq.ifr_flags);
+    try std.testing.expectEqualStrings("tun123", std.mem.sliceTo(&ifreq.ifr_name, 0));
+}
+
+test "tun linux ifreq rejects too long interface name" {
+    try std.testing.expectError(error.NameTooLong, linuxIfReq("interface-name-too-long"));
 }
