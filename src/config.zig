@@ -103,6 +103,7 @@ pub const Server = struct {
     key: ?[]const u8,
     method: crypto.CipherKind,
     mode: Mode,
+    no_delay: bool,
     tcp_weight: u16,
     udp_weight: u16,
     acl_path: ?[]const u8,
@@ -119,6 +120,7 @@ pub const Local = struct {
     protocol: LocalProtocol,
     tcp_redir: RedirType,
     udp_redir: RedirType,
+    no_delay: bool,
     forward_host: ?[]const u8,
     forward_port: ?u16,
     local_dns_host: ?[]const u8,
@@ -167,6 +169,7 @@ pub const Overrides = struct {
     acl_path: ?[]const u8 = null,
     plugin: ?[]const u8 = null,
     plugin_opts: ?[]const u8 = null,
+    no_delay: ?bool = null,
 
     pub fn hasAny(self: Overrides) bool {
         return self.server_host != null or
@@ -185,7 +188,8 @@ pub const Overrides = struct {
             self.manager_address != null or
             self.acl_path != null or
             self.plugin != null or
-            self.plugin_opts != null;
+            self.plugin_opts != null or
+            self.no_delay != null;
     }
 };
 
@@ -251,6 +255,7 @@ pub const Config = struct {
             .key = null,
             .method = overrides.method orelse .aes_256_gcm,
             .mode = mode,
+            .no_delay = overrides.no_delay orelse false,
             .tcp_weight = server_weight_scale,
             .udp_weight = server_weight_scale,
             .acl_path = try dupeOptionalSlice(a, overrides.acl_path),
@@ -268,6 +273,7 @@ pub const Config = struct {
             .protocol = protocol,
             .tcp_redir = overrides.tcp_redir orelse RedirType.tcpDefault(),
             .udp_redir = overrides.udp_redir orelse RedirType.udpDefault(),
+            .no_delay = overrides.no_delay orelse false,
             .forward_host = try dupeOptionalSlice(a, forward_host),
             .forward_port = forward_port,
             .local_dns_host = null,
@@ -305,6 +311,7 @@ pub const Config = struct {
             if (overrides.plugin) |plugin| server.plugin = try a.dupe(u8, plugin);
             if (overrides.plugin_opts) |plugin_opts| server.plugin_opts = try a.dupe(u8, plugin_opts);
             if (overrides.mode) |mode| server.plugin_mode = mode;
+            if (overrides.no_delay) |no_delay| server.no_delay = no_delay;
         }
         for (self.locals) |*local| {
             if (overrides.local_host) |host| local.host = try a.dupe(u8, host);
@@ -316,6 +323,7 @@ pub const Config = struct {
             if (overrides.forward_host) |host| local.forward_host = try a.dupe(u8, host);
             if (overrides.forward_port) |port| local.forward_port = port;
             if (overrides.acl_path) |acl_path| local.acl_path = try a.dupe(u8, acl_path);
+            if (overrides.no_delay) |no_delay| local.no_delay = no_delay;
             if ((local.protocol == .tunnel or local.protocol == .dns) and (local.forward_host == null or local.forward_port == null)) {
                 return error.MissingForwardAddress;
             }
@@ -410,6 +418,7 @@ pub const Config = struct {
             .key = try dupeOptionalSlice(allocator, key),
             .method = method,
             .mode = mode,
+            .no_delay = asBool(object.get("no_delay") orelse root.get("no_delay")) orelse false,
             .tcp_weight = try parseWeight(object.get("tcp_weight") orelse root.get("tcp_weight")),
             .udp_weight = try parseWeight(object.get("udp_weight") orelse root.get("udp_weight")),
             .acl_path = try dupOptionalNonEmptyString(allocator, object.get("acl") orelse root.get("acl")),
@@ -437,6 +446,7 @@ pub const Config = struct {
             .protocol = protocol,
             .tcp_redir = try RedirType.parse(asString(object.get("tcp_redir") orelse root.get("tcp_redir")), RedirType.tcpDefault()),
             .udp_redir = try RedirType.parse(asString(object.get("udp_redir") orelse root.get("udp_redir")), RedirType.udpDefault()),
+            .no_delay = asBool(object.get("no_delay") orelse root.get("no_delay")) orelse false,
             .forward_host = forward_host,
             .forward_port = forward_port,
             .local_dns_host = local_dns_host,
@@ -661,6 +671,14 @@ fn asString(value: ?std.json.Value) ?[]const u8 {
     };
 }
 
+fn asBool(value: ?std.json.Value) ?bool {
+    const v = value orelse return null;
+    return switch (v) {
+        .bool => |b| b,
+        else => null,
+    };
+}
+
 fn dupString(allocator: std.mem.Allocator, value: std.json.Value) ConfigError![]const u8 {
     const s = asString(value) orelse return error.InvalidConfig;
     return try allocator.dupe(u8, s);
@@ -769,6 +787,7 @@ test "parse classic shadowsocks config" {
         \\  "plugin_mode": "tcp_only",
         \\  "acl": "tests/local.acl",
         \\  "manager_address": "127.0.0.1:6001",
+        \\  "no_delay": true,
         \\  "udp_timeout": 10,
         \\  "udp_max_associations": 32
         \\}
@@ -792,6 +811,8 @@ test "parse classic shadowsocks config" {
     try std.testing.expectEqualStrings("tests/local.acl", cfg.locals[0].acl_path.?);
     try std.testing.expectEqual(@as(u16, 1080), cfg.locals[0].port);
     try std.testing.expectEqual(Mode.tcp_and_udp, cfg.locals[0].mode);
+    try std.testing.expect(cfg.servers[0].no_delay);
+    try std.testing.expect(cfg.locals[0].no_delay);
     try std.testing.expectEqualStrings("127.0.0.1", cfg.manager.?.host);
     try std.testing.expectEqual(@as(u16, 6001), cfg.manager.?.port);
     try std.testing.expectEqual(ManagerTransport.ip, cfg.manager.?.transport);
@@ -810,6 +831,7 @@ test "build config from libev-style CLI overrides" {
         .mode = .tcp_and_udp,
         .plugin = "fake-plugin",
         .plugin_opts = "obfs=tls",
+        .no_delay = true,
     });
     defer cfg.deinit();
 
@@ -820,6 +842,8 @@ test "build config from libev-style CLI overrides" {
     try std.testing.expectEqual(crypto.CipherKind.aes_128_gcm, cfg.servers[0].method);
     try std.testing.expectEqual(Mode.tcp_and_udp, cfg.servers[0].mode);
     try std.testing.expectEqual(Mode.tcp_and_udp, cfg.locals[0].mode);
+    try std.testing.expect(cfg.servers[0].no_delay);
+    try std.testing.expect(cfg.locals[0].no_delay);
     try std.testing.expectEqualStrings("fake-plugin", cfg.servers[0].plugin.?);
     try std.testing.expectEqualStrings("obfs=tls", cfg.servers[0].plugin_opts.?);
 }
@@ -846,6 +870,7 @@ test "apply CLI overrides to parsed config" {
         .mode = .udp_only,
         .protocol = .redir,
         .tcp_redir = .tproxy,
+        .no_delay = true,
     });
 
     try std.testing.expectEqualStrings("203.0.113.7", cfg.servers[0].host);
@@ -856,6 +881,8 @@ test "apply CLI overrides to parsed config" {
     try std.testing.expectEqual(@as(u16, 1090), cfg.locals[0].port);
     try std.testing.expectEqual(LocalProtocol.redir, cfg.locals[0].protocol);
     try std.testing.expectEqual(RedirType.tproxy, cfg.locals[0].tcp_redir);
+    try std.testing.expect(cfg.servers[0].no_delay);
+    try std.testing.expect(cfg.locals[0].no_delay);
 }
 
 test "parse libev classic server array" {

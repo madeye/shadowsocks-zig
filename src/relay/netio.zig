@@ -49,6 +49,10 @@ pub const TcpStream = struct {
         return try socketPeerAddress(self.fd);
     }
 
+    pub fn setNoDelay(self: *const TcpStream) void {
+        setTcpNoDelay(self.fd);
+    }
+
     pub fn read(self: *TcpStream, out: []u8) !usize {
         while (true) {
             if (!try libuv.waitReadable(self.fd, infinite_timeout_ms)) continue;
@@ -72,6 +76,11 @@ pub const TcpStream = struct {
         }
     }
 };
+
+pub fn setTcpNoDelay(fd: std.posix.socket_t) void {
+    var one: c_int = 1;
+    std.posix.setsockopt(fd, std.posix.IPPROTO.TCP, 1, std.mem.asBytes(&one)) catch {};
+}
 
 pub const UdpSocket = struct {
     fd: std.posix.socket_t,

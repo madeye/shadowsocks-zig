@@ -18,6 +18,7 @@ const Entry = struct {
     key: ?[]const u8 = null,
     method: []const u8,
     mode: config.Mode,
+    no_delay: bool = false,
     acl_path: ?[]const u8 = null,
     plugin: ?[]const u8 = null,
     plugin_opts: ?[]const u8 = null,
@@ -216,6 +217,7 @@ pub const Manager = struct {
             .key = key,
             .method = method,
             .mode = config.Mode.parse(jsonString(object.get("mode")) orelse @tagName(self.default_mode)),
+            .no_delay = jsonBool(object.get("no_delay")) orelse false,
             .plugin = plugin_name,
             .plugin_opts = plugin_opts,
             .plugin_args = plugin_args,
@@ -332,6 +334,9 @@ pub const Manager = struct {
             }
             try out.appendSlice(self.allocator, ",\"method\":");
             try appendJsonString(&out, self.allocator, entry.method);
+            if (entry.no_delay) {
+                try out.appendSlice(self.allocator, ",\"no_delay\":true");
+            }
             try out.appendSlice(self.allocator, "},");
         }
         if (self.entries.items.len > 0) {
@@ -388,6 +393,7 @@ fn entryFromServer(allocator: std.mem.Allocator, server_cfg: config.Server) !Ent
         .key = key,
         .method = method,
         .mode = server_cfg.mode,
+        .no_delay = server_cfg.no_delay,
         .acl_path = acl_path,
         .plugin = plugin_name,
         .plugin_opts = plugin_opts,
@@ -433,6 +439,14 @@ fn jsonString(value: ?std.json.Value) ?[]const u8 {
     const v = value orelse return null;
     return switch (v) {
         .string => |s| s,
+        else => null,
+    };
+}
+
+fn jsonBool(value: ?std.json.Value) ?bool {
+    const v = value orelse return null;
+    return switch (v) {
+        .bool => |b| b,
         else => null,
     };
 }
@@ -564,6 +578,9 @@ fn renderServerConfig(allocator: std.mem.Allocator, entry: Entry, manager_addres
     try appendJsonString(&out, allocator, entry.method);
     try out.appendSlice(allocator, ",\n  \"mode\":");
     try appendJsonString(&out, allocator, @tagName(entry.mode));
+    if (entry.no_delay) {
+        try out.appendSlice(allocator, ",\n  \"no_delay\":true");
+    }
     try out.appendSlice(allocator, ",\n  \"manager_address\":");
     try appendJsonString(&out, allocator, manager_address.address);
     if (entry.acl_path) |acl_path| {
@@ -747,6 +764,7 @@ test "manager preserves configured raw keys" {
         \\  "server_port": 8388,
         \\  "key": "AQIDBAUGBwgJCgsMDQ4PEA==",
         \\  "method": "aes-128-gcm",
+        \\  "no_delay": true,
         \\  "manager_address": "127.0.0.1:6001"
         \\}
     );
@@ -758,9 +776,11 @@ test "manager preserves configured raw keys" {
     const list = (try mgr.processCommand("list")).?;
     defer std.testing.allocator.free(list);
     try std.testing.expect(std.mem.indexOf(u8, list, "\"key\":\"AQIDBAUGBwgJCgsMDQ4PEA==\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, list, "\"no_delay\":true") != null);
 
     const rendered = try renderServerConfig(std.testing.allocator, mgr.entries.items[0], cfg.manager.?);
     defer std.testing.allocator.free(rendered);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "\"password\":\"\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "\"key\":\"AQIDBAUGBwgJCgsMDQ4PEA==\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "\"no_delay\":true") != null);
 }

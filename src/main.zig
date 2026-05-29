@@ -105,7 +105,9 @@ pub fn main(init: std.process.Init) !void {
             overrides.udp_redir = try shadowsocks.config.RedirType.parse(args.next() orelse return invalidArgs(io), .not_supported);
         } else if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "-a") or std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--mtu")) {
             _ = args.next() orelse return invalidArgs(io);
-        } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "-6") or std.mem.eql(u8, arg, "--fast-open") or std.mem.eql(u8, arg, "--no-delay") or std.mem.eql(u8, arg, "--reuse-port")) {
+        } else if (std.mem.eql(u8, arg, "--no-delay")) {
+            overrides.no_delay = true;
+        } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "-6") or std.mem.eql(u8, arg, "--fast-open") or std.mem.eql(u8, arg, "--reuse-port")) {
             continue;
         } else {
             try std.Io.File.stderr().writeStreamingAll(io, usage);

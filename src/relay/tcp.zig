@@ -223,7 +223,8 @@ fn runServerInstance(
     defer server.close();
 
     while (true) {
-        const conn = try server.accept();
+        var conn = try server.accept();
+        if (tcp_server_cfg.no_delay) conn.setNoDelay();
         const thread = try std.Thread.spawn(.{}, handleServerConnection, .{ allocator, io, conn, tcp_server_cfg, &replay_protector, acl_ptr, &traffic_counter });
         thread.detach();
     }
@@ -313,7 +314,8 @@ fn runLocalInstance(
     defer listener.close();
 
     while (true) {
-        const conn = try listener.accept();
+        var conn = try listener.accept();
+        if (local_cfg.no_delay) conn.setNoDelay();
         const thread = try std.Thread.spawn(.{}, handleLocalConnection, .{ allocator, io, conn, selector, local_cfg, acl_ptr, fake_dns_manager });
         thread.detach();
     }
@@ -350,13 +352,14 @@ fn runRedirLocal(
     defer listener.close();
 
     while (true) {
-        const conn = try listener.accept();
+        var conn = try listener.accept();
+        if (local_cfg.no_delay) conn.setNoDelay();
         const target = netio.tcpRedirDestination(conn, local_cfg.tcp_redir) catch {
             conn.close();
             continue;
         };
         const target_address = try netio.ipToShadow(target);
-        const thread = try std.Thread.spawn(.{}, handleRedirConnection, .{ allocator, io, conn, selector, target_address, access_control });
+        const thread = try std.Thread.spawn(.{}, handleRedirConnection, .{ allocator, io, conn, selector, target_address, local_cfg.no_delay, access_control });
         thread.detach();
     }
 }
@@ -381,7 +384,8 @@ fn runFakeDnsLocal(
     defer listener.close();
 
     while (true) {
-        const conn = try listener.accept();
+        var conn = try listener.accept();
+        if (local_cfg.no_delay) conn.setNoDelay();
         const thread = try std.Thread.spawn(.{}, handleFakeDnsConnection, .{ allocator, io, conn, manager });
         thread.detach();
     }
@@ -421,8 +425,9 @@ fn runTunnelLocal(
     defer listener.close();
 
     while (true) {
-        const conn = try listener.accept();
-        const thread = try std.Thread.spawn(.{}, handleTunnelConnection, .{ allocator, io, conn, selector, forward_address, access_control });
+        var conn = try listener.accept();
+        if (local_cfg.no_delay) conn.setNoDelay();
+        const thread = try std.Thread.spawn(.{}, handleTunnelConnection, .{ allocator, io, conn, selector, forward_address, local_cfg.no_delay, access_control });
         thread.detach();
     }
 }
@@ -464,8 +469,9 @@ fn runDnsLocal(
     defer listener.close();
 
     while (true) {
-        const conn = try listener.accept();
-        const thread = try std.Thread.spawn(.{}, handleDnsConnection, .{ allocator, io, conn, selector, remote_dns_address, local_dns_address, access_control });
+        var conn = try listener.accept();
+        if (local_cfg.no_delay) conn.setNoDelay();
+        const thread = try std.Thread.spawn(.{}, handleDnsConnection, .{ allocator, io, conn, selector, remote_dns_address, local_dns_address, local_cfg.no_delay, access_control });
         thread.detach();
     }
 }
@@ -476,10 +482,11 @@ fn handleTunnelConnection(
     client: netio.TcpStream,
     selector: *ServerSelector,
     forward_address: ss_address.Address,
+    no_delay: bool,
     access_control: ?*const acl.AccessControl,
 ) void {
     var wrapped = client;
-    targetTcpConnection(allocator, io, &wrapped, selector, forward_address, access_control) catch {};
+    targetTcpConnection(allocator, io, &wrapped, selector, forward_address, no_delay, access_control) catch {};
 }
 
 fn handleRedirConnection(
@@ -488,10 +495,11 @@ fn handleRedirConnection(
     client: netio.TcpStream,
     selector: *ServerSelector,
     target_address: ss_address.Address,
+    no_delay: bool,
     access_control: ?*const acl.AccessControl,
 ) void {
     var wrapped = client;
-    targetTcpConnection(allocator, io, &wrapped, selector, target_address, access_control) catch {};
+    targetTcpConnection(allocator, io, &wrapped, selector, target_address, no_delay, access_control) catch {};
 }
 
 fn handleDnsConnection(
@@ -501,10 +509,11 @@ fn handleDnsConnection(
     selector: *ServerSelector,
     remote_dns_address: ss_address.Address,
     local_dns_address: ?ss_address.Address,
+    no_delay: bool,
     access_control: ?*const acl.AccessControl,
 ) void {
     var wrapped = client;
-    dnsConnection(allocator, io, &wrapped, selector, remote_dns_address, local_dns_address, access_control) catch {};
+    dnsConnection(allocator, io, &wrapped, selector, remote_dns_address, local_dns_address, no_delay, access_control) catch {};
 }
 
 fn handleFakeDnsConnection(
@@ -547,6 +556,7 @@ fn dnsConnection(
     selector: *ServerSelector,
     remote_dns_address: ss_address.Address,
     local_dns_address: ?ss_address.Address,
+    no_delay: bool,
     access_control: ?*const acl.AccessControl,
 ) !void {
     defer client.close();
@@ -561,7 +571,7 @@ fn dnsConnection(
 
     const target_address = dnsTargetAddress(io, packet, remote_dns_address, local_dns_address, access_control);
     if (local_dns_address != null and isSameAddress(target_address, local_dns_address.?)) {
-        var remote = try connectTarget(io, target_address);
+        var remote = try connectTargetWithNoDelay(io, target_address, no_delay);
         defer remote.close();
         try remote.writeAll(&len_buf);
         try remote.writeAll(packet);
@@ -586,12 +596,13 @@ fn targetTcpConnection(
     client: *netio.TcpStream,
     selector: *ServerSelector,
     target_address: ss_address.Address,
+    no_delay: bool,
     access_control: ?*const acl.AccessControl,
 ) !void {
     defer client.close();
 
     if (targetBypassed(access_control, io, target_address)) {
-        var remote = try connectTarget(io, target_address);
+        var remote = try connectTargetWithNoDelay(io, target_address, no_delay);
         defer remote.close();
 
         const inbound_thread = try std.Thread.spawn(.{}, pipePlainToPlain, .{ remote, client.* });
@@ -781,7 +792,7 @@ fn socks5LocalConnectionAfterVersion(
     defer rewrite.deinit(allocator);
     const target_address = rewrite.address;
     if (targetBypassed(access_control, io, target_address)) {
-        var remote = try connectTarget(io, target_address);
+        var remote = try connectTargetWithNoDelay(io, target_address, local_cfg.no_delay);
         defer remote.close();
 
         const success_len = try socks5.writeReply(.succeeded, unspecifiedAddress(), &small);
@@ -835,7 +846,7 @@ fn socks4LocalConnectionAfterVersion(
     defer rewrite.deinit(allocator);
     const target_address = rewrite.address;
     if (targetBypassed(access_control, io, target_address)) {
-        var remote = try connectTarget(io, target_address);
+        var remote = try connectTargetWithNoDelay(io, target_address, local_cfg.no_delay);
         defer remote.close();
 
         const success_len = try socks4.writeResponse(.request_granted, &small);
@@ -876,7 +887,7 @@ fn httpLocalConnectionAfterFirstByte(
     defer rewrite.deinit(allocator);
     const target_address = rewrite.address;
     if (targetBypassed(access_control, io, target_address)) {
-        var remote = try connectTarget(io, target_address);
+        var remote = try connectTargetWithNoDelay(io, target_address, local_cfg.no_delay);
         defer remote.close();
 
         switch (request.kind) {
@@ -951,7 +962,7 @@ fn serverConnection(
     const parsed = try ss_address.Address.read(first_packet);
     if (outboundBlocked(access_control, io, parsed.address)) return error.OutboundBlockedByAcl;
 
-    var remote = try connectTarget(io, parsed.address);
+    var remote = try connectTargetWithNoDelay(io, parsed.address, server_cfg.no_delay);
     defer remote.close();
     if (parsed.used < first_packet.len) {
         const payload = first_packet[parsed.used..];
@@ -1005,7 +1016,7 @@ fn serverConnectionAead2022(
     if (padding_len == 0 and payload_off == first_packet.len) return error.AuthenticationFailed;
     if (outboundBlocked(access_control, io, parsed.address)) return error.OutboundBlockedByAcl;
 
-    var remote = try connectTarget(io, parsed.address);
+    var remote = try connectTargetWithNoDelay(io, parsed.address, server_cfg.no_delay);
     defer remote.close();
     if (payload_off < first_packet.len) {
         const payload = first_packet[payload_off..];
@@ -1037,12 +1048,20 @@ fn serverConnectionAead2022(
 
 fn connectConfiguredServer(io: std.Io, server_cfg: config.Server) !netio.TcpStream {
     _ = io;
-    return try netio.connectTcp(server_cfg.host, server_cfg.port);
+    var stream = try netio.connectTcp(server_cfg.host, server_cfg.port);
+    if (server_cfg.no_delay) stream.setNoDelay();
+    return stream;
 }
 
 fn connectTarget(io: std.Io, address: ss_address.Address) !netio.TcpStream {
     _ = io;
     return try netio.connectTcpAddress(try netio.shadowToIp(address));
+}
+
+fn connectTargetWithNoDelay(io: std.Io, address: ss_address.Address, no_delay: bool) !netio.TcpStream {
+    var stream = try connectTarget(io, address);
+    if (no_delay) stream.setNoDelay();
+    return stream;
 }
 
 fn targetBypassed(access_control: ?*const acl.AccessControl, io: std.Io, address: ss_address.Address) bool {
