@@ -78,6 +78,7 @@ jobs:
           zig-out/bin/ss-zig --check -c tests/aes-gcm-redir-pf-udp.json
           zig-out/bin/ss-zig --check -c tests/aes-gcm-fake-dns.json
           zig-out/bin/ss-zig --check -c tests/aes-gcm-key.json
+          zig-out/bin/ss-zig --check -c tests/aes-gcm-string-numbers.json
           zig-out/bin/ss-zig --check -c tests/aead2022-aes128-tcp.json
           zig-out/bin/ss-local --check -c tests/aes-gcm-udp.json
           zig-out/bin/ssserver --check -c tests/aes-gcm-http.json

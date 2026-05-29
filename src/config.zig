@@ -694,6 +694,7 @@ fn asU64(value: ?std.json.Value) ?u64 {
     return switch (v) {
         .integer => |i| if (i >= 0) @intCast(i) else null,
         .float => |f| if (f >= 0) @intFromFloat(f) else null,
+        .string => |s| std.fmt.parseInt(u64, s, 10) catch null,
         else => null,
     };
 }
@@ -703,6 +704,7 @@ fn asF64(value: ?std.json.Value) ?f64 {
     return switch (v) {
         .integer => |i| @floatFromInt(i),
         .float => |f| f,
+        .string => |s| std.fmt.parseFloat(f64, s) catch null,
         else => null,
     };
 }
@@ -897,6 +899,35 @@ test "parse libev raw key without password" {
     try std.testing.expectEqualStrings("", cfg.servers[0].password);
     try std.testing.expectEqualStrings("AQIDBAUGBwgJCgsMDQ4PEA==", cfg.servers[0].key.?);
     try std.testing.expectEqual(crypto.CipherKind.aes_128_gcm, cfg.servers[0].method);
+}
+
+test "parse libev numeric strings" {
+    var cfg = try Config.parseSlice(std.testing.allocator,
+        \\{
+        \\  "server": "127.0.0.1",
+        \\  "server_port": "8388",
+        \\  "local_address": "127.0.0.1",
+        \\  "local_port": "1080",
+        \\  "password": "secret",
+        \\  "method": "aes-256-gcm",
+        \\  "timeout": "60",
+        \\  "udp_timeout": "12",
+        \\  "tcp_weight": "0.5",
+        \\  "udp_weight": "0.25",
+        \\  "manager_address": "127.0.0.1",
+        \\  "manager_port": "6001"
+        \\}
+    );
+    defer cfg.deinit();
+
+    try std.testing.expectEqual(@as(u16, 8388), cfg.servers[0].port);
+    try std.testing.expectEqual(@as(u16, 1080), cfg.locals[0].port);
+    try std.testing.expectEqual(@as(u64, 60), cfg.timeout_seconds);
+    try std.testing.expectEqual(@as(u64, 12), cfg.udp_timeout_seconds);
+    try std.testing.expectEqual(@as(u16, 50), cfg.servers[0].tcp_weight);
+    try std.testing.expectEqual(@as(u16, 25), cfg.servers[0].udp_weight);
+    try std.testing.expectEqualStrings("127.0.0.1", cfg.manager.?.host);
+    try std.testing.expectEqual(@as(u16, 6001), cfg.manager.?.port);
 }
 
 test "parse libev port_password entries" {
