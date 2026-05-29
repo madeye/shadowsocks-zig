@@ -419,11 +419,12 @@ fn cleanupRuntimeUdpAssociations(
 }
 
 fn nowNs(io: std.Io) i64 {
-    return @intCast(std.Io.Clock.monotonic.now(io).toNanoseconds());
+    return @intCast(std.Io.Clock.awake.now(io).nanoseconds);
 }
 
 fn timeoutNs(seconds: u64) i64 {
-    return @intCast(seconds * std.time.ns_per_s);
+    const ns = seconds *| std.time.ns_per_s;
+    return std.math.cast(i64, ns) orelse std.math.maxInt(i64);
 }
 
 fn openLinuxTun(name: ?[]const u8) !Device {
