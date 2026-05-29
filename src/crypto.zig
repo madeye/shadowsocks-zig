@@ -24,6 +24,8 @@ pub const CipherKind = enum {
     chacha20_ietf_poly1305,
     aes_128_cfb,
     aes_256_cfb,
+    aes_128_ctr,
+    aes_256_ctr,
     rc4_md5,
     chacha20_ietf,
     xchacha20_ietf_poly1305,
@@ -47,6 +49,8 @@ pub const CipherKind = enum {
             .chacha20_ietf_poly1305 => "chacha20-ietf-poly1305",
             .aes_128_cfb => "aes-128-cfb",
             .aes_256_cfb => "aes-256-cfb",
+            .aes_128_ctr => "aes-128-ctr",
+            .aes_256_ctr => "aes-256-ctr",
             .rc4_md5 => "rc4-md5",
             .chacha20_ietf => "chacha20-ietf",
             .xchacha20_ietf_poly1305 => "xchacha20-ietf-poly1305",
@@ -60,7 +64,7 @@ pub const CipherKind = enum {
         return switch (self) {
             .none => .none,
             .aes_128_gcm, .aes_256_gcm, .chacha20_ietf_poly1305, .xchacha20_ietf_poly1305 => .aead,
-            .aes_128_cfb, .aes_256_cfb, .rc4_md5, .chacha20_ietf => .stream,
+            .aes_128_cfb, .aes_256_cfb, .aes_128_ctr, .aes_256_ctr, .rc4_md5, .chacha20_ietf => .stream,
             .aead2022_blake3_aes_128_gcm,
             .aead2022_blake3_aes_256_gcm,
             .aead2022_blake3_chacha20_poly1305,
@@ -78,8 +82,8 @@ pub const CipherKind = enum {
             .aead2022_blake3_aes_256_gcm,
             .aead2022_blake3_chacha20_poly1305,
             => 32,
-            .aes_128_cfb => 16,
-            .aes_256_cfb, .chacha20_ietf => 32,
+            .aes_128_cfb, .aes_128_ctr => 16,
+            .aes_256_cfb, .aes_256_ctr, .chacha20_ietf => 32,
             .rc4_md5 => 16,
         };
     }
@@ -88,7 +92,7 @@ pub const CipherKind = enum {
         return switch (self) {
             .aes_128_gcm => 16,
             .aes_256_gcm, .chacha20_ietf_poly1305, .xchacha20_ietf_poly1305 => 32,
-            .aes_128_cfb, .aes_256_cfb, .rc4_md5 => 16,
+            .aes_128_cfb, .aes_256_cfb, .aes_128_ctr, .aes_256_ctr, .rc4_md5 => 16,
             .chacha20_ietf => 12,
             .aead2022_blake3_aes_128_gcm => 16,
             .aead2022_blake3_aes_256_gcm,
@@ -129,7 +133,7 @@ pub const CipherKind = enum {
     }
 
     pub fn isImplemented(self: CipherKind) bool {
-        return self == .none or self == .aes_128_cfb or self == .aes_256_cfb or self == .rc4_md5 or self == .chacha20_ietf or self.category() == .aead or self.category() == .aead2022;
+        return self == .none or isImplementedStreamCipher(self) or self.category() == .aead or self.category() == .aead2022;
     }
 };
 
@@ -208,6 +212,18 @@ pub fn blake3Derive(out: []u8, context: []const u8, key: []const u8, salt: []con
     hasher.update(key);
     hasher.update(salt);
     hasher.final(out);
+}
+
+fn isAesCfbCipher(method: CipherKind) bool {
+    return method == .aes_128_cfb or method == .aes_256_cfb;
+}
+
+fn isAesCtrCipher(method: CipherKind) bool {
+    return method == .aes_128_ctr or method == .aes_256_ctr;
+}
+
+fn isImplementedStreamCipher(method: CipherKind) bool {
+    return isAesCfbCipher(method) or isAesCtrCipher(method) or method == .rc4_md5 or method == .chacha20_ietf;
 }
 
 pub const AeadCipher = struct {
@@ -567,7 +583,7 @@ pub const StreamCipher = struct {
     rc4_j: u8 = 0,
 
     pub fn init(method: CipherKind, master_key: []const u8, nonce: []const u8) CryptoError!StreamCipher {
-        if (method != .aes_128_cfb and method != .aes_256_cfb and method != .rc4_md5 and method != .chacha20_ietf) return error.UnsupportedCipher;
+        if (!isImplementedStreamCipher(method)) return error.UnsupportedCipher;
         if (master_key.len != method.keyLen()) return error.InvalidKeyLength;
         if (nonce.len != method.saltLen()) return error.InvalidKeyLength;
 
@@ -597,8 +613,12 @@ pub const StreamCipher = struct {
     }
 
     fn encryptInto(self: *StreamCipher, allocator: std.mem.Allocator, out: []u8, input: []const u8) CryptoError!void {
-        if (self.method == .aes_128_cfb or self.method == .aes_256_cfb) {
+        if (isAesCfbCipher(self.method)) {
             self.applyAesCfb(out, input, .encrypt);
+            return;
+        }
+        if (isAesCtrCipher(self.method)) {
+            self.applyAesCtr(out, input);
             return;
         }
         if (self.method == .rc4_md5) {
@@ -609,8 +629,12 @@ pub const StreamCipher = struct {
     }
 
     fn decryptInto(self: *StreamCipher, allocator: std.mem.Allocator, out: []u8, input: []const u8) CryptoError!void {
-        if (self.method == .aes_128_cfb or self.method == .aes_256_cfb) {
+        if (isAesCfbCipher(self.method)) {
             self.applyAesCfb(out, input, .decrypt);
+            return;
+        }
+        if (isAesCtrCipher(self.method)) {
+            self.applyAesCtr(out, input);
             return;
         }
         if (self.method == .rc4_md5) {
@@ -644,6 +668,56 @@ pub const StreamCipher = struct {
         self.position += input.len;
     }
 
+    fn applyAesCtr(self: *StreamCipher, out: []u8, input: []const u8) void {
+        std.debug.assert(out.len == input.len);
+        const block_offset: usize = @intCast(self.position % 16);
+        const block_counter = self.position / 16;
+        var counter = self.nonce;
+        addAesCtrCounter(&counter, block_counter);
+
+        var index: usize = 0;
+        var offset = block_offset;
+        while (index < input.len) {
+            var stream: [16]u8 = undefined;
+            self.encryptAesBlock(&stream, counter);
+            while (offset < stream.len and index < input.len) : ({
+                offset += 1;
+                index += 1;
+            }) {
+                out[index] = input[index] ^ stream[offset];
+            }
+            if (offset == stream.len) {
+                incrementAesCtrCounter(&counter);
+                offset = 0;
+            }
+        }
+
+        self.position += input.len;
+    }
+
+    fn addAesCtrCounter(iv: *[16]u8, blocks: u64) void {
+        var carry: u16 = 0;
+        var remaining = blocks;
+        var i = iv.len;
+        while (i > 0) {
+            i -= 1;
+            const addend: u16 = @as(u16, @intCast(remaining & 0xff)) + carry;
+            const sum: u16 = @as(u16, iv[i]) + addend;
+            iv[i] = @intCast(sum & 0xff);
+            carry = sum >> 8;
+            remaining >>= 8;
+        }
+    }
+
+    fn incrementAesCtrCounter(iv: *[16]u8) void {
+        var i = iv.len;
+        while (i > 0) {
+            i -= 1;
+            iv[i] +%= 1;
+            if (iv[i] != 0) break;
+        }
+    }
+
     const AesCfbOperation = enum {
         encrypt,
         decrypt,
@@ -666,11 +740,11 @@ pub const StreamCipher = struct {
     fn encryptAesBlock(self: *const StreamCipher, out: *[16]u8, input: [16]u8) void {
         const aes = std.crypto.core.aes;
         switch (self.method) {
-            .aes_128_cfb => {
+            .aes_128_cfb, .aes_128_ctr => {
                 const ctx = aes.Aes128.initEnc(self.key[0..16].*);
                 ctx.encrypt(out, &input);
             },
-            .aes_256_cfb => {
+            .aes_256_cfb, .aes_256_ctr => {
                 const ctx = aes.Aes256.initEnc(self.key[0..32].*);
                 ctx.encrypt(out, &input);
             },
@@ -922,7 +996,7 @@ fn encryptStreamUdpPacket(
     master_key: []const u8,
     plain: []const u8,
 ) CryptoError![]u8 {
-    if (method != .aes_128_cfb and method != .aes_256_cfb and method != .rc4_md5 and method != .chacha20_ietf) return error.UnsupportedCipher;
+    if (!isImplementedStreamCipher(method)) return error.UnsupportedCipher;
     if (master_key.len != method.keyLen()) return error.InvalidKeyLength;
     const nonce_len = method.saltLen();
     const out = try allocator.alloc(u8, nonce_len + plain.len);
@@ -941,7 +1015,7 @@ fn decryptStreamUdpPacket(
     master_key: []const u8,
     packet: []const u8,
 ) CryptoError![]u8 {
-    if (method != .aes_128_cfb and method != .aes_256_cfb and method != .rc4_md5 and method != .chacha20_ietf) return error.UnsupportedCipher;
+    if (!isImplementedStreamCipher(method)) return error.UnsupportedCipher;
     if (master_key.len != method.keyLen()) return error.InvalidKeyLength;
     const nonce_len = method.saltLen();
     if (packet.len < nonce_len) return error.AuthenticationFailed;
@@ -1094,14 +1168,18 @@ test "cipher names parse rust/libev strings" {
     try std.testing.expectEqual(CipherKind.aes_128_gcm, try CipherKind.parse("aes-128-gcm"));
     try std.testing.expectEqual(CipherKind.chacha20_ietf_poly1305, try CipherKind.parse("chacha20-ietf-poly1305"));
     try std.testing.expectEqual(CipherKind.xchacha20_ietf_poly1305, try CipherKind.parse("xchacha20-ietf-poly1305"));
+    try std.testing.expectEqual(CipherKind.aes_256_ctr, try CipherKind.parse("aes-256-ctr"));
     try std.testing.expectEqualStrings("2022-blake3-aes-256-gcm", CipherKind.aead2022_blake3_aes_256_gcm.name());
     try std.testing.expect(CipherKind.aes_128_cfb.isImplemented());
+    try std.testing.expect(CipherKind.aes_256_ctr.isImplemented());
     try std.testing.expect(CipherKind.rc4_md5.isImplemented());
     try std.testing.expect(CipherKind.chacha20_ietf.isImplemented());
     try std.testing.expect(CipherKind.xchacha20_ietf_poly1305.isImplemented());
     try std.testing.expectEqual(CipherCategory.aead, CipherKind.xchacha20_ietf_poly1305.category());
     try std.testing.expectEqual(@as(usize, 32), CipherKind.xchacha20_ietf_poly1305.saltLen());
     try std.testing.expectEqual(@as(usize, 24), CipherKind.xchacha20_ietf_poly1305.nonceLen());
+    try std.testing.expectEqual(@as(usize, 16), CipherKind.aes_128_ctr.keyLen());
+    try std.testing.expectEqual(@as(usize, 16), CipherKind.aes_256_ctr.saltLen());
 }
 
 test "EVP_BytesToKey compatible MD5 derivation is deterministic" {
@@ -1314,6 +1392,97 @@ test "AES-CFB stream cipher matches NIST vectors and uneven chunk boundaries" {
     }
 }
 
+test "AES-CTR stream cipher matches NIST vectors and uneven chunk boundaries" {
+    const cases = [_]struct {
+        method: CipherKind,
+        key: []const u8,
+        iv: [16]u8,
+        plain: []const u8,
+        cipher: []const u8,
+    }{
+        .{
+            .method = .aes_128_ctr,
+            .key = &[_]u8{
+                0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6,
+                0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c,
+            },
+            .iv = [_]u8{
+                0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7,
+                0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd, 0xfe, 0xff,
+            },
+            .plain = &[_]u8{
+                0x6b, 0xc1, 0xbe, 0xe2, 0x2e, 0x40, 0x9f, 0x96,
+                0xe9, 0x3d, 0x7e, 0x11, 0x73, 0x93, 0x17, 0x2a,
+                0xae, 0x2d, 0x8a, 0x57, 0x1e, 0x03, 0xac, 0x9c,
+                0x9e, 0xb7, 0x6f, 0xac, 0x45, 0xaf, 0x8e, 0x51,
+            },
+            .cipher = &[_]u8{
+                0x87, 0x4d, 0x61, 0x91, 0xb6, 0x20, 0xe3, 0x26,
+                0x1b, 0xef, 0x68, 0x64, 0x99, 0x0d, 0xb6, 0xce,
+                0x98, 0x06, 0xf6, 0x6b, 0x79, 0x70, 0xfd, 0xff,
+                0x86, 0x17, 0x18, 0x7b, 0xb9, 0xff, 0xfd, 0xff,
+            },
+        },
+        .{
+            .method = .aes_256_ctr,
+            .key = &[_]u8{
+                0x60, 0x3d, 0xeb, 0x10, 0x15, 0xca, 0x71, 0xbe,
+                0x2b, 0x73, 0xae, 0xf0, 0x85, 0x7d, 0x77, 0x81,
+                0x1f, 0x35, 0x2c, 0x07, 0x3b, 0x61, 0x08, 0xd7,
+                0x2d, 0x98, 0x10, 0xa3, 0x09, 0x14, 0xdf, 0xf4,
+            },
+            .iv = [_]u8{
+                0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7,
+                0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd, 0xfe, 0xff,
+            },
+            .plain = &[_]u8{
+                0x6b, 0xc1, 0xbe, 0xe2, 0x2e, 0x40, 0x9f, 0x96,
+                0xe9, 0x3d, 0x7e, 0x11, 0x73, 0x93, 0x17, 0x2a,
+                0xae, 0x2d, 0x8a, 0x57, 0x1e, 0x03, 0xac, 0x9c,
+                0x9e, 0xb7, 0x6f, 0xac, 0x45, 0xaf, 0x8e, 0x51,
+            },
+            .cipher = &[_]u8{
+                0x60, 0x1e, 0xc3, 0x13, 0x77, 0x57, 0x89, 0xa5,
+                0xb7, 0xa7, 0xf5, 0x04, 0xbb, 0xf3, 0xd2, 0x28,
+                0xf4, 0x43, 0xe3, 0xca, 0x4d, 0x62, 0xb5, 0x9a,
+                0xca, 0x84, 0xe9, 0x90, 0xca, 0xca, 0xf5, 0xc5,
+            },
+        },
+    };
+
+    for (cases) |case| {
+        var key: [32]u8 = [_]u8{0} ** 32;
+        @memcpy(key[0..case.key.len], case.key);
+
+        var enc = try StreamCipher.init(case.method, key[0..case.method.keyLen()], &case.iv);
+        const first = try enc.encrypt(std.testing.allocator, case.plain[0..5]);
+        defer std.testing.allocator.free(first);
+        const second = try enc.encrypt(std.testing.allocator, case.plain[5..19]);
+        defer std.testing.allocator.free(second);
+        const third = try enc.encrypt(std.testing.allocator, case.plain[19..]);
+        defer std.testing.allocator.free(third);
+
+        var sealed = std.ArrayList(u8).empty;
+        defer sealed.deinit(std.testing.allocator);
+        try sealed.appendSlice(std.testing.allocator, first);
+        try sealed.appendSlice(std.testing.allocator, second);
+        try sealed.appendSlice(std.testing.allocator, third);
+        try std.testing.expectEqualSlices(u8, case.cipher, sealed.items);
+
+        var dec = try StreamCipher.init(case.method, key[0..case.method.keyLen()], &case.iv);
+        const plain_a = try dec.decrypt(std.testing.allocator, sealed.items[0..11]);
+        defer std.testing.allocator.free(plain_a);
+        const plain_b = try dec.decrypt(std.testing.allocator, sealed.items[11..]);
+        defer std.testing.allocator.free(plain_b);
+
+        var opened = std.ArrayList(u8).empty;
+        defer opened.deinit(std.testing.allocator);
+        try opened.appendSlice(std.testing.allocator, plain_a);
+        try opened.appendSlice(std.testing.allocator, plain_b);
+        try std.testing.expectEqualSlices(u8, case.plain, opened.items);
+    }
+}
+
 test "RC4 core matches public test vector" {
     var cipher = StreamCipher{
         .method = .rc4_md5,
@@ -1374,6 +1543,29 @@ test "chacha20-ietf UDP packet encrypt/decrypt round trip" {
 
 test "AES-CFB UDP packet encrypt/decrypt round trip" {
     const methods = [_]CipherKind{ .aes_128_cfb, .aes_256_cfb };
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    for (methods) |method| {
+        var master: [32]u8 = undefined;
+        deriveKey("secret", master[0..method.keyLen()]);
+
+        const packet = try encryptUdpPacket(std.testing.allocator, io, method, master[0..method.keyLen()], "\x03\x0bexample.com\x01\xbbpayload");
+        defer std.testing.allocator.free(packet);
+        try std.testing.expectEqual(@as(usize, method.saltLen() + 1 + 1 + 11 + 2 + 7), packet.len);
+
+        const replay_key = try saltFromUdpPacket(method, packet);
+        try std.testing.expectEqual(@as(usize, 16), replay_key.len);
+
+        const plain = try decryptUdpPacket(std.testing.allocator, method, master[0..method.keyLen()], packet);
+        defer std.testing.allocator.free(plain);
+        try std.testing.expectEqualStrings("\x03\x0bexample.com\x01\xbbpayload", plain);
+    }
+}
+
+test "AES-CTR UDP packet encrypt/decrypt round trip" {
+    const methods = [_]CipherKind{ .aes_128_ctr, .aes_256_ctr };
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();

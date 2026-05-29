@@ -17,9 +17,10 @@ Current state:
 - AEAD-2022 TCP and UDP framing for `2022-blake3-aes-128-gcm`,
   `2022-blake3-aes-256-gcm`, and `2022-blake3-chacha20-poly1305`, including
   SIP022 base64 master-key decoding.
-- Legacy `aes-128-cfb`, `aes-256-cfb`, `rc4-md5`, and `chacha20-ietf` stream
-  TCP and UDP framing via Zig `std.crypto` primitives where available, with a
-  small local RC4 implementation for RC4-MD5 compatibility.
+- Legacy `aes-128-cfb`, `aes-256-cfb`, `aes-128-ctr`, `aes-256-ctr`,
+  `rc4-md5`, and `chacha20-ietf` stream TCP and UDP framing via Zig
+  `std.crypto` primitives where available, with a small local RC4
+  implementation for RC4-MD5 compatibility.
 - TCP `ss-local` protocol-specific local listeners for `protocol = "socks"` and
   `protocol = "http"` with supported ciphers.
 - TCP and UDP tunnel local mode via `protocol = "tunnel"` with
@@ -201,6 +202,8 @@ Latest libuv/Zig 0.16 smoke checks:
   ran Zig `--local` plus Zig `--server`; SOCKS5 TCP reached an HTTP target on
   `127.0.0.1:18107`, and SOCKS5 UDP ASSOCIATE reached a UDP echo target on
   `127.0.0.1:18108`.
+- `aes-256-ctr` stream config smoke: [tests/aes-ctr.json](tests/aes-ctr.json)
+  validates the libev-compatible AES-CTR method with TCP and UDP mode enabled.
 - `rc4-md5` stream TCP/UDP smoke: [tests/rc4-md5.json](tests/rc4-md5.json)
   ran Zig `--local` plus Zig `--server`; SOCKS5 TCP reached an HTTP target on
   `127.0.0.1:18109`, and SOCKS5 UDP ASSOCIATE reached a UDP echo target on
