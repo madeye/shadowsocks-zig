@@ -1,0 +1,4 @@
+[proxy_all]
+
+[bypass_list]
+127.0.0.0/8

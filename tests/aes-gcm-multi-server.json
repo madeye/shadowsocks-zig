@@ -1,0 +1,22 @@
+{
+  "local_address": "127.0.0.1",
+  "local_port": 1098,
+  "mode": "tcp_only",
+  "servers": [
+    {
+      "server": "127.0.0.1",
+      "server_port": 8408,
+      "password": "barfoo!",
+      "method": "aes-256-gcm",
+      "mode": "tcp_only"
+    },
+    {
+      "server": "127.0.0.1",
+      "server_port": 8409,
+      "password": "barfoo!",
+      "method": "aes-256-gcm",
+      "mode": "tcp_only"
+    }
+  ],
+  "timeout": 60
+}

@@ -1,0 +1,11 @@
+{
+  "server": "127.0.0.1",
+  "server_port": 8416,
+  "local_address": "127.0.0.1",
+  "local_port": 1106,
+  "password": "barfoo!",
+  "method": "xchacha20-ietf-poly1305",
+  "protocol": "socks",
+  "mode": "tcp_and_udp",
+  "timeout": 60
+}

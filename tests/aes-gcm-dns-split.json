@@ -1,0 +1,16 @@
+{
+  "server": "127.0.0.1",
+  "server_port": 8413,
+  "local_address": "127.0.0.1",
+  "local_port": 1103,
+  "password": "barfoo!",
+  "method": "aes-256-gcm",
+  "protocol": "dns",
+  "remote_dns_address": "127.0.0.1",
+  "remote_dns_port": 18105,
+  "local_dns_address": "127.0.0.1",
+  "local_dns_port": 18106,
+  "mode": "tcp_and_udp",
+  "acl": "tests/dns-split.acl",
+  "timeout": 60
+}

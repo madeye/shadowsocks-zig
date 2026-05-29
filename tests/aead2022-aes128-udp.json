@@ -1,0 +1,9 @@
+{
+  "server": "127.0.0.1",
+  "server_port": 8402,
+  "local_address": "127.0.0.1",
+  "local_port": 1092,
+  "password": "3L69X4PF2eSL/JSLkoWnXg==",
+  "method": "2022-blake3-aes-128-gcm",
+  "mode": "tcp_and_udp"
+}

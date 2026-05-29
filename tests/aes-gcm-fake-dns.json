@@ -1,0 +1,26 @@
+{
+  "server": "127.0.0.1",
+  "server_port": 8417,
+  "local_address": "127.0.0.1",
+  "local_port": 1107,
+  "password": "barfoo!",
+  "method": "aes-256-gcm",
+  "mode": "tcp_and_udp",
+  "locals": [
+    {
+      "protocol": "fake-dns",
+      "local_address": "127.0.0.1",
+      "local_port": 1107,
+      "fake_dns_ipv4_network": "10.255.0.0/16",
+      "fake_dns_ipv6_network": "fc00::/7",
+      "fake_dns_database_path": ".zig-cache/ss-zig-fakedns-smoke",
+      "fake_dns_record_expire_duration": 10
+    },
+    {
+      "protocol": "socks",
+      "local_address": "127.0.0.1",
+      "local_port": 1108,
+      "mode": "tcp_and_udp"
+    }
+  ]
+}

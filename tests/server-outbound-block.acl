@@ -1,0 +1,6 @@
+[accept_all]
+
+[outbound_allow_all]
+
+[outbound_block_list]
+127.0.0.0/8

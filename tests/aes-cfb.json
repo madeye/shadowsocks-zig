@@ -1,0 +1,11 @@
+{
+  "server": "127.0.0.1",
+  "server_port": 8414,
+  "local_address": "127.0.0.1",
+  "local_port": 1104,
+  "password": "barfoo!",
+  "method": "aes-256-cfb",
+  "protocol": "socks",
+  "mode": "tcp_and_udp",
+  "timeout": 60
+}

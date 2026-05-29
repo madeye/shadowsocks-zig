@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  ubuntu:
+    name: Ubuntu 24.04 / Zig 0.16
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ca-certificates \
+            curl \
+            xz-utils \
+            build-essential \
+            pkg-config \
+            libuv1-dev \
+            libre2-dev
+
+      - name: Install Zig 0.16.0
+        run: |
+          curl -fsSL https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz -o "$RUNNER_TEMP/zig.tar.xz"
+          mkdir -p "$RUNNER_TEMP/zig"
+          tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP/zig" --strip-components=1
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+
+      - name: Check toolchain
+        run: zig version
+
+      - name: Unit tests
+        run: zig build test
+
+      - name: Build
+        run: zig build
+
+      - name: Config checks
+        run: |
+          zig-out/bin/ss-zig --check -c tests/aes-gcm-redir.json
+          zig-out/bin/ss-zig --check -c tests/aes-gcm-fake-dns.json
+          zig-out/bin/ss-zig --check -c tests/aead2022-aes128-tcp.json
+
+      - name: Linux redir startup
+        run: |
+          set +e
+          timeout 2s zig-out/bin/ss-zig --local -c tests/aes-gcm-redir.json
+          code=$?
+          set -e
+          if [ "$code" -ne 124 ]; then
+            echo "expected redir local to start and wait for connections, got exit code $code" >&2
+            exit "$code"
+          fi
