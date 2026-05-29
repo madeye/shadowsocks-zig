@@ -123,7 +123,11 @@ retrieves the original destination with `SO_ORIGINAL_DST`, TCP `tproxy` uses
 the accepted socket local address after binding with `IP_TRANSPARENT`, and UDP
 `tproxy` receives original-destination control messages with `recvmsg` before
 sending responses from transparent sockets bound to the original destination.
-BSD/macOS `pf`/`ipfw` destination lookup remains future work.
+For BSD-style TCP redir, macOS/iOS and FreeBSD `pf` use `/dev/pf`
+`DIOCNATLOOK` with layouts pinned to shadowsocks-rust's bindgen output,
+OpenBSD `pf` uses the accepted socket local address, and `ipfw` uses the
+accepted socket local address on macOS/iOS/FreeBSD. BSD/macOS UDP redir remains
+future work.
 
 Fake-DNS local support follows shadowsocks-rust's `protocol = "fake-dns"`
 configuration keys for IPv4/IPv6 pools, database path, and record expiration.

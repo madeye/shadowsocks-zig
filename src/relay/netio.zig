@@ -127,14 +127,26 @@ pub fn listenTcp(host: []const u8, port: u16) !TcpListener {
 }
 
 pub fn listenTcpRedir(host: []const u8, port: u16, redir_type: config.RedirType) !TcpListener {
-    switch (redir_type) {
-        .redirect, .tproxy => {},
-        .pf, .ipfw, .not_supported => return error.RedirectionUnsupported,
-    }
-    if (builtin.os.tag != .linux) return error.RedirectionUnsupported;
-
     const address = try net.IpAddress.parse(host, port);
-    return listenTcpAddress(address, redir_type == .tproxy);
+    return switch (redir_type) {
+        .redirect, .tproxy => {
+            if (builtin.os.tag != .linux) return error.RedirectionUnsupported;
+            return listenTcpAddress(address, redir_type == .tproxy);
+        },
+        .pf => {
+            switch (builtin.os.tag) {
+                .macos, .ios, .freebsd, .openbsd => return listenTcpAddress(address, false),
+                else => return error.RedirectionUnsupported,
+            }
+        },
+        .ipfw => {
+            switch (builtin.os.tag) {
+                .macos, .ios, .freebsd => return listenTcpAddress(address, false),
+                else => return error.RedirectionUnsupported,
+            }
+        },
+        .not_supported => error.RedirectionUnsupported,
+    };
 }
 
 fn listenTcpAddress(address: net.IpAddress, transparent: bool) !TcpListener {
@@ -154,7 +166,17 @@ pub fn tcpRedirDestination(stream: TcpStream, redir_type: config.RedirType) !net
     return switch (redir_type) {
         .redirect => try tcpOriginalDestination(stream.fd),
         .tproxy => try socketLocalAddress(stream.fd),
-        .pf, .ipfw, .not_supported => error.RedirectionUnsupported,
+        .pf => switch (builtin.os.tag) {
+            .macos, .ios => try pfNatlookDarwinTcp(stream.fd),
+            .freebsd => try pfNatlookFreeBsdTcp(stream.fd),
+            .openbsd => try socketLocalAddress(stream.fd),
+            else => error.RedirectionUnsupported,
+        },
+        .ipfw => switch (builtin.os.tag) {
+            .macos, .ios, .freebsd => try socketLocalAddress(stream.fd),
+            else => error.RedirectionUnsupported,
+        },
+        .not_supported => error.RedirectionUnsupported,
     };
 }
 
@@ -817,6 +839,130 @@ fn tcpOriginalDestination(fd: std.posix.socket_t) !net.IpAddress {
     }
 }
 
+const PfAddr = extern struct {
+    words: [4]u32,
+};
+
+const PfPort = extern union {
+    port: u16,
+    call_id: u16,
+    spi: u32,
+};
+
+const PfiocNatlookDarwin = extern struct {
+    saddr: PfAddr,
+    daddr: PfAddr,
+    rsaddr: PfAddr,
+    rdaddr: PfAddr,
+    sxport: PfPort,
+    dxport: PfPort,
+    rsxport: PfPort,
+    rdxport: PfPort,
+    af: u8,
+    proto: u8,
+    proto_variant: u8,
+    direction: u8,
+};
+
+const PfiocNatlookFreeBsd = extern struct {
+    saddr: PfAddr,
+    daddr: PfAddr,
+    rsaddr: PfAddr,
+    rdaddr: PfAddr,
+    sport: u16,
+    dport: u16,
+    rsport: u16,
+    rdport: u16,
+    af: u8,
+    proto: u8,
+    direction: u8,
+};
+
+fn pfNatlookDarwinTcp(fd: std.posix.socket_t) !net.IpAddress {
+    if (builtin.os.tag != .macos and builtin.os.tag != .ios) return error.RedirectionUnsupported;
+
+    const local = try socketLocalAddress(fd);
+    const peer = try socketPeerAddress(fd);
+    var lookup: PfiocNatlookDarwin = std.mem.zeroes(PfiocNatlookDarwin);
+    try fillPfLookupAddress(&lookup.daddr, &lookup.dxport.port, &lookup.af, local);
+    try fillPfLookupAddress(&lookup.saddr, &lookup.sxport.port, &lookup.af, peer);
+    lookup.proto = 6;
+    lookup.direction = 2;
+
+    try pfNatlookIoctl(PfiocNatlookDarwin, &lookup);
+    return pfNatlookResult(lookup.af, lookup.rdaddr, lookup.rdxport.port);
+}
+
+fn pfNatlookFreeBsdTcp(fd: std.posix.socket_t) !net.IpAddress {
+    if (builtin.os.tag != .freebsd) return error.RedirectionUnsupported;
+
+    const local = try socketLocalAddress(fd);
+    const peer = try socketPeerAddress(fd);
+    var lookup: PfiocNatlookFreeBsd = std.mem.zeroes(PfiocNatlookFreeBsd);
+    try fillPfLookupAddress(&lookup.daddr, &lookup.dport, &lookup.af, local);
+    try fillPfLookupAddress(&lookup.saddr, &lookup.sport, &lookup.af, peer);
+    lookup.proto = 6;
+    lookup.direction = 2;
+
+    try pfNatlookIoctl(PfiocNatlookFreeBsd, &lookup);
+    return pfNatlookResult(lookup.af, lookup.rdaddr, lookup.rdport);
+}
+
+fn fillPfLookupAddress(addr: *PfAddr, port: *u16, family: *u8, address: net.IpAddress) !void {
+    switch (address) {
+        .ip4 => |ip4| {
+            const af = @as(u8, @intCast(std.posix.AF.INET));
+            if (family.* != 0 and family.* != af) return error.AddressFamilyUnsupported;
+            family.* = af;
+            @memcpy(std.mem.asBytes(&addr.words)[0..4], &ip4.bytes);
+            port.* = std.mem.nativeToBig(u16, ip4.port);
+        },
+        .ip6 => |ip6| {
+            const af = @as(u8, @intCast(std.posix.AF.INET6));
+            if (family.* != 0 and family.* != af) return error.AddressFamilyUnsupported;
+            family.* = af;
+            @memcpy(std.mem.asBytes(&addr.words)[0..16], &ip6.bytes);
+            port.* = std.mem.nativeToBig(u16, ip6.port);
+        },
+    }
+}
+
+fn pfNatlookResult(family: u8, addr: PfAddr, port: u16) !net.IpAddress {
+    if (family == @as(u8, @intCast(std.posix.AF.INET))) {
+        var bytes: [4]u8 = undefined;
+        @memcpy(&bytes, std.mem.asBytes(&addr.words)[0..4]);
+        return .{ .ip4 = .{ .bytes = bytes, .port = std.mem.bigToNative(u16, port) } };
+    }
+    if (family == @as(u8, @intCast(std.posix.AF.INET6))) {
+        var bytes: [16]u8 = undefined;
+        @memcpy(&bytes, std.mem.asBytes(&addr.words)[0..16]);
+        return .{ .ip6 = .{ .bytes = bytes, .port = std.mem.bigToNative(u16, port), .interface = .none } };
+    }
+    return error.UnsupportedAddressFamily;
+}
+
+fn pfNatlookIoctl(comptime Lookup: type, lookup: *Lookup) !void {
+    const fd = try std.posix.openatZ(std.posix.AT.FDCWD, "/dev/pf", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
+    defer closeFd(fd);
+
+    const req = ioctlReadWrite('D', 23, Lookup);
+    switch (std.posix.errno(std.c.ioctl(fd, req, lookup))) {
+        .SUCCESS => return,
+        .ACCES, .PERM => return error.AccessDenied,
+        .BADF => return error.SocketNotConnected,
+        .INVAL => return error.RedirectionOriginalDestinationMissing,
+        .NOENT => return error.RedirectionOriginalDestinationMissing,
+        .NXIO => return error.RedirectionUnsupported,
+        else => |err| return std.posix.unexpectedErrno(err),
+    }
+}
+
+fn ioctlReadWrite(comptime group: u8, comptime number: u8, comptime Payload: type) c_int {
+    const IOC_INOUT: u32 = 0xc0000000;
+    const request = IOC_INOUT | (@as(u32, @sizeOf(Payload)) << 16) | (@as(u32, group) << 8) | @as(u32, number);
+    return @as(c_int, @bitCast(request));
+}
+
 fn posixToIpAddress(storage: *const PosixAddress) !net.IpAddress {
     return switch (storage.any.family) {
         std.posix.AF.INET => .{ .ip4 = .{
@@ -831,4 +977,41 @@ fn posixToIpAddress(storage: *const PosixAddress) !net.IpAddress {
         } },
         else => error.UnsupportedAddressFamily,
     };
+}
+
+test "pf natlook ABI layouts match upstream bindgen" {
+    try std.testing.expectEqual(@as(usize, 16), @sizeOf(PfAddr));
+    try std.testing.expectEqual(@as(usize, 4), @alignOf(PfAddr));
+    try std.testing.expectEqual(@as(usize, 4), @sizeOf(PfPort));
+    try std.testing.expectEqual(@as(usize, 4), @alignOf(PfPort));
+
+    try std.testing.expectEqual(@as(usize, 84), @sizeOf(PfiocNatlookDarwin));
+    try std.testing.expectEqual(@as(usize, 4), @alignOf(PfiocNatlookDarwin));
+    try std.testing.expectEqual(@as(usize, 64), @offsetOf(PfiocNatlookDarwin, "sxport"));
+    try std.testing.expectEqual(@as(usize, 68), @offsetOf(PfiocNatlookDarwin, "dxport"));
+    try std.testing.expectEqual(@as(usize, 76), @offsetOf(PfiocNatlookDarwin, "rdxport"));
+    try std.testing.expectEqual(@as(usize, 80), @offsetOf(PfiocNatlookDarwin, "af"));
+    try std.testing.expectEqual(@as(usize, 83), @offsetOf(PfiocNatlookDarwin, "direction"));
+
+    try std.testing.expectEqual(@as(usize, 76), @sizeOf(PfiocNatlookFreeBsd));
+    try std.testing.expectEqual(@as(usize, 4), @alignOf(PfiocNatlookFreeBsd));
+    try std.testing.expectEqual(@as(usize, 64), @offsetOf(PfiocNatlookFreeBsd, "sport"));
+    try std.testing.expectEqual(@as(usize, 66), @offsetOf(PfiocNatlookFreeBsd, "dport"));
+    try std.testing.expectEqual(@as(usize, 70), @offsetOf(PfiocNatlookFreeBsd, "rdport"));
+    try std.testing.expectEqual(@as(usize, 72), @offsetOf(PfiocNatlookFreeBsd, "af"));
+    try std.testing.expectEqual(@as(usize, 74), @offsetOf(PfiocNatlookFreeBsd, "direction"));
+}
+
+test "pf natlook address helpers preserve bytes and network order ports" {
+    var addr: PfAddr = std.mem.zeroes(PfAddr);
+    var port: u16 = 0;
+    var family: u8 = 0;
+
+    try fillPfLookupAddress(&addr, &port, &family, .{ .ip4 = .{ .bytes = .{ 192, 0, 2, 10 }, .port = 5353 } });
+    try std.testing.expectEqual(@as(u8, @intCast(std.posix.AF.INET)), family);
+    try std.testing.expectEqual(std.mem.nativeToBig(u16, 5353), port);
+    try std.testing.expectEqualSlices(u8, &.{ 192, 0, 2, 10 }, std.mem.asBytes(&addr.words)[0..4]);
+
+    const restored = try pfNatlookResult(family, addr, port);
+    try std.testing.expect(restored.eql(&.{ .ip4 = .{ .bytes = .{ 192, 0, 2, 10 }, .port = 5353 } }));
 }

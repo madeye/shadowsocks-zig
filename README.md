@@ -28,8 +28,10 @@ Current state:
 - TCP and UDP transparent redir local mode via `protocol = "redir"` with
   shadowsocks-rust-compatible `tcp_redir`/`udp_redir` config parsing. The
   current relay wiring supports Linux TCP `redirect`/`tproxy` and UDP `tproxy`
-  sockets through the libuv-backed POSIX socket layer; BSD/macOS `pf`/`ipfw`
-  destination lookup is still pending.
+  sockets through the libuv-backed POSIX socket layer. TCP `pf` is wired for
+  macOS/iOS and FreeBSD through `/dev/pf` `DIOCNATLOOK`, OpenBSD `pf` uses the
+  accepted socket local address, and TCP `ipfw` uses the socket local address
+  on macOS/iOS/FreeBSD. BSD/macOS UDP redir is still pending.
 - TCP and UDP DNS local mode via `protocol = "dns"` with
   `remote_dns_address`/`remote_dns_port` and optional
   `local_dns_address`/`local_dns_port`. DNS locals default to
@@ -225,11 +227,13 @@ Latest libuv/Zig 0.16 smoke checks:
   target through Shadowsocks. A UDP DNS AAAA query also returned an address from
   `fc00::/7`, and a SOCKS5 IPv6 CONNECT to that fake IPv6 was rewritten back to
   the same HTTP target.
-- Redir local config smoke: [tests/aes-gcm-redir.json](tests/aes-gcm-redir.json)
-  and [tests/aes-gcm-redir-udp.json](tests/aes-gcm-redir-udp.json) validate
-  `protocol = "redir"`, `tcp_redir = "redirect"`, and `udp_redir = "tproxy"`
-  with `--check`. GitHub CI also starts Linux TCP redir and sudo-starts Linux
-  UDP TPROXY redir long enough to verify the sockets bind and wait for traffic.
+- Redir local config smoke: [tests/aes-gcm-redir.json](tests/aes-gcm-redir.json),
+  [tests/aes-gcm-redir-udp.json](tests/aes-gcm-redir-udp.json), and
+  [tests/aes-gcm-redir-pf.json](tests/aes-gcm-redir-pf.json) validate
+  `protocol = "redir"`, Linux `tcp_redir = "redirect"`, Linux
+  `udp_redir = "tproxy"`, and BSD/macOS `tcp_redir = "pf"` config with
+  `--check`. GitHub CI also starts Linux TCP redir and sudo-starts Linux UDP
+  TPROXY redir long enough to verify the sockets bind and wait for traffic.
 - Multi-instance smoke:
   [tests/aes-gcm-multi-local.json](tests/aes-gcm-multi-local.json) started one
   SOCKS local listener and one HTTP local listener in the same `--local`
@@ -245,6 +249,6 @@ Latest libuv/Zig 0.16 smoke checks:
 
 Remaining high-level port work:
 
-- Remaining specialized local protocol work from shadowsocks-rust/libev:
-  BSD/macOS redir backends, tun interfaces, and RocksDB-compatible fake-DNS
-  storage.
+- Remaining specialized local protocol work from shadowsocks-rust/libev: live
+  BSD/macOS UDP redir, full BSD/macOS pf/ipfw integration tests with kernel
+  rules, tun interfaces, and RocksDB-compatible fake-DNS storage.
