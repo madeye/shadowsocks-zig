@@ -226,6 +226,7 @@ pub const Overrides = struct {
     no_delay: ?bool = null,
     reuse_port: ?bool = null,
     ipv6_first: ?bool = null,
+    nofile: ?u64 = null,
     tcp_buffers: TcpBufferConfig = .{},
     outbound_bind: OutboundBindConfig = .{},
 
@@ -251,6 +252,7 @@ pub const Overrides = struct {
             self.no_delay != null or
             self.reuse_port != null or
             self.ipv6_first != null or
+            self.nofile != null or
             self.tcp_buffers.hasAny() or
             self.outbound_bind.hasAny();
     }
@@ -265,6 +267,7 @@ pub const Config = struct {
     timeout_seconds: u64,
     udp_timeout_seconds: u64,
     udp_max_associations: ?usize,
+    nofile: ?u64,
 
     pub fn deinit(self: *Config) void {
         self.arena.deinit();
@@ -369,6 +372,7 @@ pub const Config = struct {
             .timeout_seconds = timeout,
             .udp_timeout_seconds = timeout,
             .udp_max_associations = null,
+            .nofile = overrides.nofile,
         };
     }
 
@@ -415,6 +419,7 @@ pub const Config = struct {
             self.timeout_seconds = timeout;
             self.udp_timeout_seconds = timeout;
         }
+        if (overrides.nofile) |nofile| self.nofile = nofile;
         if (overrides.manager_address) |address| {
             self.manager = try parseManagerAddress(a, address);
         }
@@ -479,6 +484,7 @@ pub const Config = struct {
             .timeout_seconds = asU64(root.get("timeout")) orelse 300,
             .udp_timeout_seconds = asU64(root.get("udp_timeout")) orelse 300,
             .udp_max_associations = asUsize(root.get("udp_max_associations")),
+            .nofile = try parseNofile(root.get("nofile")),
         };
     }
 
@@ -726,6 +732,13 @@ fn parseOptionalPort(value: ?std.json.Value) ConfigError!?u16 {
     return @intCast(port);
 }
 
+fn parseNofile(value: ?std.json.Value) ConfigError!?u64 {
+    if (value == null) return null;
+    const nofile = asU64(value) orelse return error.InvalidConfig;
+    if (nofile == 0) return error.InvalidConfig;
+    return nofile;
+}
+
 fn parseTcpBufferConfig(object: std.json.ObjectMap, root: std.json.ObjectMap) ConfigError!TcpBufferConfig {
     return .{
         .incoming_sndbuf = try parseTcpBufferSize(object.get("tcp_incoming_sndbuf") orelse root.get("tcp_incoming_sndbuf")),
@@ -962,7 +975,8 @@ test "parse classic shadowsocks config" {
         \\  "tcp_outgoing_sndbuf": 32770,
         \\  "tcp_outgoing_rcvbuf": "32771",
         \\  "udp_timeout": 10,
-        \\  "udp_max_associations": 32
+        \\  "udp_max_associations": 32,
+        \\  "nofile": 4096
         \\}
     );
     defer cfg.deinit();
@@ -1009,6 +1023,7 @@ test "parse classic shadowsocks config" {
     try std.testing.expectEqual(ManagerTransport.ip, cfg.manager.?.transport);
     try std.testing.expectEqual(@as(u64, 10), cfg.udp_timeout_seconds);
     try std.testing.expectEqual(@as(?usize, 32), cfg.udp_max_associations);
+    try std.testing.expectEqual(@as(?u64, 4096), cfg.nofile);
 }
 
 test "build config from libev-style CLI overrides" {
@@ -1025,6 +1040,7 @@ test "build config from libev-style CLI overrides" {
         .no_delay = true,
         .reuse_port = true,
         .ipv6_first = true,
+        .nofile = 2048,
         .outbound_bind = .{
             .ipv4 = "127.0.0.2",
             .ipv6 = "::1",
@@ -1057,6 +1073,7 @@ test "build config from libev-style CLI overrides" {
     try std.testing.expectEqual(@as(?u32, 40963), cfg.locals[0].tcp_buffers.outgoing_rcvbuf);
     try std.testing.expectEqualStrings("127.0.0.2", cfg.servers[0].outbound_bind.ipv4.?);
     try std.testing.expectEqualStrings("::1", cfg.servers[0].outbound_bind.ipv6.?);
+    try std.testing.expectEqual(@as(?u64, 2048), cfg.nofile);
     try std.testing.expectEqualStrings("fake-plugin", cfg.servers[0].plugin.?);
     try std.testing.expectEqualStrings("obfs=tls", cfg.servers[0].plugin_opts.?);
 }
@@ -1100,6 +1117,7 @@ test "apply CLI overrides to parsed config" {
         .no_delay = true,
         .reuse_port = true,
         .ipv6_first = true,
+        .nofile = 8192,
         .outbound_bind = .{
             .ipv4 = "127.0.0.3",
         },
@@ -1130,6 +1148,7 @@ test "apply CLI overrides to parsed config" {
     try std.testing.expectEqual(@as(?u32, 49154), cfg.servers[0].tcp_buffers.outgoing_sndbuf);
     try std.testing.expectEqual(@as(?u32, 49155), cfg.locals[0].tcp_buffers.outgoing_rcvbuf);
     try std.testing.expectEqualStrings("127.0.0.3", cfg.servers[0].outbound_bind.ipv4.?);
+    try std.testing.expectEqual(@as(?u64, 8192), cfg.nofile);
 }
 
 test "apply CLI password override clears configured raw key" {
@@ -1224,6 +1243,7 @@ test "parse libev numeric strings" {
         \\  "method": "aes-256-gcm",
         \\  "timeout": "60",
         \\  "udp_timeout": "12",
+        \\  "nofile": "1024",
         \\  "tcp_weight": "0.5",
         \\  "udp_weight": "0.25",
         \\  "manager_address": "127.0.0.1",
@@ -1236,6 +1256,7 @@ test "parse libev numeric strings" {
     try std.testing.expectEqual(@as(u16, 1080), cfg.locals[0].port);
     try std.testing.expectEqual(@as(u64, 60), cfg.timeout_seconds);
     try std.testing.expectEqual(@as(u64, 12), cfg.udp_timeout_seconds);
+    try std.testing.expectEqual(@as(?u64, 1024), cfg.nofile);
     try std.testing.expectEqual(@as(u16, 50), cfg.servers[0].tcp_weight);
     try std.testing.expectEqual(@as(u16, 25), cfg.servers[0].udp_weight);
     try std.testing.expectEqualStrings("127.0.0.1", cfg.manager.?.host);
@@ -1608,6 +1629,18 @@ test "parse rejects invalid server weights" {
         \\  "password": "secret",
         \\  "method": "aes-256-gcm",
         \\  "udp_weight": -0.1
+        \\}
+    ));
+}
+
+test "parse rejects invalid nofile" {
+    try std.testing.expectError(error.InvalidConfig, Config.parseSlice(std.testing.allocator,
+        \\{
+        \\  "server": "127.0.0.1",
+        \\  "server_port": 8388,
+        \\  "password": "secret",
+        \\  "method": "aes-256-gcm",
+        \\  "nofile": 0
         \\}
     ));
 }

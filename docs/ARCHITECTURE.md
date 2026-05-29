@@ -33,6 +33,9 @@ wrapper. Zig 0.16's `std.Io.Evented` surface is not used for sockets because
 the available 0.16 Evented backends do not yet provide the complete TCP/UDP
 surface needed here. `std.Io` remains in use for process, file, random, and DNS
 helper APIs.
+When configured, libev/shadowsocks-rust `nofile` is applied with
+`setrlimit(RLIMIT_NOFILE)` before starting local, server, or manager services;
+`--check` only validates and reports the value.
 
 UDP association lifecycle follows the shadowsocks-rust global config fields:
 `udp_timeout` defaults to 300 seconds and `udp_max_associations` is optional.

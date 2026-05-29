@@ -62,7 +62,7 @@ Current state:
   and local protocol while explicit `--local`, `--server`, `--manager`, and
   `--check` flags remain supported. Common libev flags such as `-s`, `-p`,
   `-b`, `-l`, `-k`, `-m`, `-u`, `-U`, `-L`, `--plugin`, `--plugin-opts`,
-  `--key`, `--acl`, `-6`, `--manager-address`, and
+  `--key`, `--acl`, `-6`, `-n`, `--manager-address`, and
   `--tcp-{incoming,outgoing}-{sndbuf,rcvbuf}` can build or override config at
   startup. In server mode, libev `-b` / `local_address` /
   `local_ipv4_address` / `local_ipv6_address` select outbound TCP source bind
@@ -99,6 +99,8 @@ Current state:
   addresses are applied before connecting to TCP targets. In local mode,
   shadowsocks-rust-style `local_udp_address` / `local_udp_port` override UDP
   bind addresses for SOCKS, tunnel, redir, DNS, and fake-DNS UDP listeners.
+  Libev/shadowsocks-rust `nofile` / `-n` applies RLIMIT_NOFILE before service
+  startup on supported Unix targets.
 - Server-side AEAD salt replay rejection with a shared rotating replay filter.
 - SOCKS5 username/password authentication for TCP local mode via
   `socks5_auth_config_path`.

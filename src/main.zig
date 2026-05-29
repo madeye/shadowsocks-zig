@@ -13,7 +13,7 @@ const usage =
     \\ss-tunnel -s <server> -p <port> -k <password> -m <method> -l <local_port> -L <target:port>
     \\
     \\Mode-specific executable names infer --local, --server, or --manager. Explicit mode flags override the executable-name default.
-    \\Common libev flags are accepted: -s, -p, -b, -l, -k, -m, -t, -u, -U, -L, -6, --key, --plugin, --plugin-opts, --acl, --manager-address, --no-delay, --reuse-port, and TCP buffer size flags.
+    \\Common libev flags are accepted: -s, -p, -b, -l, -k, -m, -t, -u, -U, -L, -6, -n, --key, --plugin, --plugin-opts, --acl, --manager-address, --no-delay, --reuse-port, and TCP buffer size flags.
     \\--local runs TCP SOCKS5/SOCKS4/HTTP/DNS/Tunnel/Redir/Fake-DNS ss-local; --server runs TCP/UDP ss-server; --manager runs the manager control API.
     \\
 ;
@@ -105,7 +105,9 @@ pub fn main(init: std.process.Init) !void {
             overrides.tcp_redir = try shadowsocks.config.RedirType.parse(args.next() orelse return invalidArgs(io), .not_supported);
         } else if (std.mem.eql(u8, arg, "--udp-redir")) {
             overrides.udp_redir = try shadowsocks.config.RedirType.parse(args.next() orelse return invalidArgs(io), .not_supported);
-        } else if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "-a") or std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--mtu")) {
+        } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--nofile")) {
+            overrides.nofile = try parseNonZeroU64Arg(args.next() orelse return invalidArgs(io));
+        } else if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "-a") or std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--mtu")) {
             _ = args.next() orelse return invalidArgs(io);
         } else if (std.mem.eql(u8, arg, "--no-delay")) {
             overrides.no_delay = true;
@@ -239,12 +241,18 @@ pub fn main(init: std.process.Init) !void {
         if (cfg.manager) |manager_cfg| {
             try stdout.print("manager {s} transport={s}\n", .{ manager_cfg.address, @tagName(manager_cfg.transport) });
         }
+        if (cfg.nofile) |nofile| {
+            try stdout.print("nofile {d}\n", .{nofile});
+        }
         try stdout.flush();
     } else if (mode == .local) {
+        try applyNofile(cfg.nofile);
         try shadowsocks.relay.tcp.runLocal(allocator, io, init.environ_map, &cfg);
     } else if (mode == .server) {
+        try applyNofile(cfg.nofile);
         try shadowsocks.relay.tcp.runServer(allocator, io, init.environ_map, &cfg);
     } else if (mode == .manager) {
+        try applyNofile(cfg.nofile);
         try shadowsocks.manager.run(allocator, io, init.environ_map, executable_path, &cfg);
     }
 }
@@ -262,6 +270,12 @@ fn parsePortArg(text: []const u8) !u16 {
 
 fn parseU64Arg(text: []const u8) !u64 {
     return std.fmt.parseInt(u64, text, 10) catch return error.InvalidArgs;
+}
+
+fn parseNonZeroU64Arg(text: []const u8) !u64 {
+    const value = try parseU64Arg(text);
+    if (value == 0) return error.InvalidArgs;
+    return value;
 }
 
 fn parseTcpBufferArg(text: []const u8) !u32 {
@@ -313,4 +327,11 @@ fn printTcpBuffersInline(stdout: anytype, buffers: shadowsocks.config.TcpBufferC
     if (buffers.incoming_rcvbuf) |value| try stdout.print(" tcp_incoming_rcvbuf={d}", .{value});
     if (buffers.outgoing_sndbuf) |value| try stdout.print(" tcp_outgoing_sndbuf={d}", .{value});
     if (buffers.outgoing_rcvbuf) |value| try stdout.print(" tcp_outgoing_rcvbuf={d}", .{value});
+}
+
+fn applyNofile(nofile: ?u64) !void {
+    const requested = nofile orelse return;
+    if (comptime std.posix.rlimit_resource == void) return error.UnsupportedRlimit;
+    const value = std.math.cast(std.posix.rlim_t, requested) orelse return error.LimitTooBig;
+    try std.posix.setrlimit(.NOFILE, .{ .cur = value, .max = value });
 }
