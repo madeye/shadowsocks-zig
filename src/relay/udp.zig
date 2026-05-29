@@ -427,13 +427,6 @@ pub fn runServer(
         cleanupServerAssociations(&target_to_client, io, udp_timeout_seconds);
         const packet = buf[0..received.len];
 
-        if (server_cfg.method.category() == .stream) {
-            if (target_to_client.getPtr(netio.addressHash(received.from))) |assoc| {
-                try sendTargetResponse(allocator, io, &socket, server_cfg.method, master_key[0..server_cfg.method.keyLen()], assoc, received.from, packet, traffic_counter);
-                continue;
-            }
-        }
-
         if (decryptClientUdpPacket(allocator, server_cfg.method, master_key[0..server_cfg.method.keyLen()], packet)) |decrypted| {
             const plain = decrypted.plain;
             defer allocator.free(plain);
@@ -512,7 +505,7 @@ fn encryptClientUdpPacket(
 ) ![]u8 {
     const method = assoc.server_cfg.method;
     return switch (method.category()) {
-        .stream, .aead => try crypto.encryptUdpPacket(allocator, io, method, assoc.master_key[0..method.keyLen()], plain),
+        .aead => try crypto.encryptUdpPacket(allocator, io, method, assoc.master_key[0..method.keyLen()], plain),
         .aead2022 => {
             assoc.client_packet_id = assoc.client_packet_id +% 1;
             if (assoc.client_packet_id == 0) {
@@ -543,7 +536,7 @@ fn encryptServerUdpPacket(
     plain: []const u8,
 ) ![]u8 {
     return switch (method.category()) {
-        .stream, .aead => try crypto.encryptUdpPacket(allocator, io, method, master_key, plain),
+        .aead => try crypto.encryptUdpPacket(allocator, io, method, master_key, plain),
         .aead2022 => {
             assoc.server_packet_id = assoc.server_packet_id +% 1;
             if (assoc.server_packet_id == 0) return error.PacketTooLong;
@@ -573,7 +566,7 @@ fn decryptClientUdpPacket(
     packet: []const u8,
 ) !DecryptedUdpPacket {
     return switch (method.category()) {
-        .stream, .aead => {
+        .aead => {
             const plain = try crypto.decryptUdpPacket(allocator, method, master_key, packet);
             errdefer allocator.free(plain);
             var replay_key: [32]u8 = [_]u8{0} ** 32;
@@ -603,7 +596,7 @@ fn decryptServerUdpPacket(
 ) !DecryptedUdpPacket {
     const method = assoc.server_cfg.method;
     return switch (method.category()) {
-        .stream, .aead => {
+        .aead => {
             const plain = try crypto.decryptUdpPacket(allocator, method, assoc.master_key[0..method.keyLen()], packet);
             return .{ .plain = plain };
         },

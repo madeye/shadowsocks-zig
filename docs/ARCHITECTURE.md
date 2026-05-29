@@ -146,9 +146,10 @@ the same key names as shadowsocks-rust, including
 `shadowsocks_fakedns_meta`, `shadowsocks_fakedns_name2ip_*`, and
 `shadowsocks_fakedns_ip2name_*`.
 
-The first supported cipher set is the SIP004 AEAD group:
+The supported cipher surface is AEAD-only. SIP004 methods include
 `aes-128-gcm`, `aes-256-gcm`, `chacha20-ietf-poly1305`, and
-`xchacha20-ietf-poly1305`. Legacy `aes-128-cfb`, `aes-256-cfb`, `rc4-md5`, and
-`chacha20-ietf` stream methods are also implemented for TCP and UDP with Zig
-`std.crypto` primitives where available and a small local RC4 implementation
-for RC4-MD5 compatibility.
+`xchacha20-ietf-poly1305`; AEAD-2022 methods include
+`2022-blake3-aes-128-gcm`, `2022-blake3-aes-256-gcm`, and
+`2022-blake3-chacha20-poly1305`. Non-AEAD legacy stream methods such as
+AES-CFB, AES-CTR, RC4-MD5, Salsa20, and plain ChaCha20 are intentionally not
+accepted by config parsing.

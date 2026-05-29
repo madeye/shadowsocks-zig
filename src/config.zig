@@ -534,6 +534,26 @@ test "parse classic shadowsocks config" {
     try std.testing.expectEqual(@as(?usize, 32), cfg.udp_max_associations);
 }
 
+test "reject non-aead legacy cipher methods" {
+    try std.testing.expectError(error.InvalidCipher, Config.parseSlice(std.testing.allocator,
+        \\{
+        \\  "server": "127.0.0.1",
+        \\  "server_port": 8388,
+        \\  "password": "secret",
+        \\  "method": "aes-256-cfb"
+        \\}
+    ));
+
+    try std.testing.expectError(error.InvalidCipher, Config.parseSlice(std.testing.allocator,
+        \\{
+        \\  "server": "127.0.0.1",
+        \\  "server_port": 8388,
+        \\  "password": "secret",
+        \\  "method": "rc4-md5"
+        \\}
+    ));
+}
+
 test "parse unix manager address" {
     var cfg = try Config.parseSlice(std.testing.allocator,
         \\{

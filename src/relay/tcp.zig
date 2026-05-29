@@ -945,10 +945,7 @@ fn serverConnection(
     var req_salt: [32]u8 = undefined;
     try readExact(client, req_salt[0..server_cfg.method.saltLen()]);
     var inbound = try crypto.TcpCipher.init(server_cfg.method, master[0..server_cfg.method.keyLen()], req_salt[0..server_cfg.method.saltLen()]);
-    const first_packet = if (server_cfg.method.category() == .stream)
-        try readStreamFirstPacket(allocator, client, &inbound)
-    else
-        try readEncryptedChunk(allocator, client, &inbound);
+    const first_packet = try readEncryptedChunk(allocator, client, &inbound);
     if (try replay_protector.checkAndSet(req_salt[0..server_cfg.method.saltLen()])) return error.RepeatedNonce;
     defer allocator.free(first_packet);
     const parsed = try ss_address.Address.read(first_packet);
@@ -1276,13 +1273,6 @@ fn writeEncryptedChunk(allocator: std.mem.Allocator, dst: *netio.TcpStream, ciph
 }
 
 fn readEncryptedChunk(allocator: std.mem.Allocator, stream: *netio.TcpStream, cipher: *crypto.TcpCipher) ![]u8 {
-    if (cipher.kind().category() == .stream) {
-        var encrypted: [max_aead_packet_size]u8 = undefined;
-        const n = try stream.read(&encrypted);
-        if (n == 0) return error.EndOfStream;
-        return try cipher.decryptPayload(allocator, encrypted[0..n], n);
-    }
-
     const tag_len = cipher.kind().tagLen();
     var sealed_len: [2 + 16]u8 = undefined;
     try readExact(stream, sealed_len[0 .. 2 + tag_len]);
@@ -1296,26 +1286,6 @@ fn readEncryptedPayload(allocator: std.mem.Allocator, stream: *netio.TcpStream, 
     defer allocator.free(sealed_payload);
     try readExact(stream, sealed_payload);
     return try cipher.decryptPayload(allocator, sealed_payload, len);
-}
-
-fn readStreamFirstPacket(allocator: std.mem.Allocator, stream: *netio.TcpStream, cipher: *crypto.TcpCipher) ![]u8 {
-    var plain = std.ArrayList(u8).empty;
-    defer plain.deinit(allocator);
-
-    while (plain.items.len < max_aead_packet_size) {
-        var encrypted: [1024]u8 = undefined;
-        const n = try stream.read(&encrypted);
-        if (n == 0) return error.EndOfStream;
-        const decoded = try cipher.decryptPayload(allocator, encrypted[0..n], n);
-        defer allocator.free(decoded);
-        try plain.appendSlice(allocator, decoded);
-        _ = ss_address.Address.read(plain.items) catch |err| switch (err) {
-            error.BufferTooSmall => continue,
-            else => |e| return e,
-        };
-        return try plain.toOwnedSlice(allocator);
-    }
-    return error.PacketTooLong;
 }
 
 fn validAead2022Timestamp(timestamp: u64) bool {
