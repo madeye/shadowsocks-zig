@@ -11,6 +11,12 @@ pub const UdpPacket = struct {
     len: usize,
 };
 
+pub const UdpRedirPacket = struct {
+    from: net.IpAddress,
+    to: net.IpAddress,
+    len: usize,
+};
+
 pub const TcpListener = struct {
     fd: std.posix.socket_t,
 
@@ -78,6 +84,16 @@ pub const UdpSocket = struct {
         while (true) {
             if (!try libuv.waitReadable(self.fd, infinite_timeout_ms)) continue;
             return recvUdp(self.fd, out) catch |err| switch (err) {
+                error.WouldBlock => continue,
+                else => |e| return e,
+            };
+        }
+    }
+
+    pub fn receiveRedirFrom(self: *UdpSocket, out: []u8) !UdpRedirPacket {
+        while (true) {
+            if (!try libuv.waitReadable(self.fd, infinite_timeout_ms)) continue;
+            return recvUdpRedir(self.fd, out) catch |err| switch (err) {
                 error.WouldBlock => continue,
                 else => |e| return e,
             };
@@ -204,10 +220,51 @@ pub fn connectTcpAddress(address: net.IpAddress) !TcpStream {
 
 pub fn bindUdp(host: []const u8, port: u16) !UdpSocket {
     const address = try net.IpAddress.parse(host, port);
+    return try bindUdpAddress(address, .{});
+}
+
+pub fn bindUdpRedirListen(host: []const u8, port: u16, redir_type: config.RedirType) !UdpSocket {
+    if (redir_type != .tproxy) return error.RedirectionUnsupported;
+    if (builtin.os.tag != .linux) return error.RedirectionUnsupported;
+
+    const address = try net.IpAddress.parse(host, port);
+    return try bindUdpAddress(address, .{
+        .transparent = true,
+        .receive_original_destination = true,
+    });
+}
+
+pub fn bindUdpRedirResponse(address: net.IpAddress, redir_type: config.RedirType) !UdpSocket {
+    if (redir_type != .tproxy) return error.RedirectionUnsupported;
+    if (builtin.os.tag != .linux) return error.RedirectionUnsupported;
+
+    return try bindUdpAddress(address, .{
+        .transparent = true,
+        .reuse_port = true,
+    });
+}
+
+const UdpBindOptions = struct {
+    transparent: bool = false,
+    receive_original_destination: bool = false,
+    reuse_port: bool = false,
+};
+
+fn bindUdpAddress(address: net.IpAddress, options: UdpBindOptions) !UdpSocket {
     var storage = ipAddressToPosix(address);
     const fd = try openPosixSocket(posixAddressFamily(address), std.posix.SOCK.DGRAM);
     errdefer closeFd(fd);
+    if (options.transparent) try setIpTransparent(fd, address);
+    if (options.receive_original_destination) try setUdpOriginalDestinationOptions(fd, address);
     try setNonblocking(fd);
+    var one: c_int = 1;
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, std.mem.asBytes(&one)) catch {};
+    if (options.reuse_port) {
+        std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.REUSEPORT, std.mem.asBytes(&one)) catch |err| switch (err) {
+            error.InvalidProtocolOption => {},
+            else => |e| return e,
+        };
+    }
     try bindPosixSocket(fd, &storage.any, posixAddressLen(address));
     return .{ .fd = fd };
 }
@@ -358,6 +415,32 @@ fn setIpTransparent(fd: std.posix.socket_t, address: net.IpAddress) !void {
     };
     var one: c_int = 1;
     try std.posix.setsockopt(fd, transparent_opt[0], transparent_opt[1], std.mem.asBytes(&one));
+}
+
+fn setUdpOriginalDestinationOptions(fd: std.posix.socket_t, address: net.IpAddress) !void {
+    if (builtin.os.tag != .linux) return error.RedirectionUnsupported;
+
+    const SOL_IP: c_int = 0;
+    const SOL_IPV6: c_int = 41;
+    const IP_RECVORIGDSTADDR: u32 = 20;
+    const IPV6_RECVORIGDSTADDR: u32 = 74;
+    const IP_MTU_DISCOVER: u32 = 10;
+    const IPV6_MTU_DISCOVER: u32 = 23;
+    const IP_PMTUDISC_DO: c_int = 2;
+
+    const recv_opt = switch (address) {
+        .ip4 => .{ SOL_IP, IP_RECVORIGDSTADDR },
+        .ip6 => .{ SOL_IPV6, IPV6_RECVORIGDSTADDR },
+    };
+    var one: c_int = 1;
+    try std.posix.setsockopt(fd, recv_opt[0], recv_opt[1], std.mem.asBytes(&one));
+
+    const mtu_opt = switch (address) {
+        .ip4 => .{ SOL_IP, IP_MTU_DISCOVER },
+        .ip6 => .{ SOL_IPV6, IPV6_MTU_DISCOVER },
+    };
+    var pmtu: c_int = IP_PMTUDISC_DO;
+    try std.posix.setsockopt(fd, mtu_opt[0], mtu_opt[1], std.mem.asBytes(&pmtu));
 }
 
 fn setNonblocking(fd: std.posix.socket_t) !void {
@@ -534,6 +617,96 @@ fn recvUdp(fd: std.posix.socket_t, out: []u8) !UdpPacket {
             else => |err| return std.posix.unexpectedErrno(err),
         }
     }
+}
+
+fn recvUdpRedir(fd: std.posix.socket_t, out: []u8) anyerror!UdpRedirPacket {
+    if (builtin.os.tag != .linux) return error.RedirectionUnsupported;
+
+    var source: PosixAddress = undefined;
+    var iov = std.posix.iovec{ .base = out.ptr, .len = out.len };
+    var control_buf: [128]u8 align(@alignOf(std.posix.cmsghdr)) = undefined;
+    var msg = std.posix.msghdr{
+        .name = &source.any,
+        .namelen = @sizeOf(PosixAddress),
+        .iov = @ptrCast(&iov),
+        .iovlen = 1,
+        .control = &control_buf,
+        .controllen = control_buf.len,
+        .flags = 0,
+    };
+
+    while (true) {
+        const rc = std.posix.system.recvmsg(fd, &msg, @as(u32, 0));
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => return .{
+                .from = try posixToIpAddress(&source),
+                .to = try originalDestinationFromControl(&msg),
+                .len = @intCast(rc),
+            },
+            .INTR => continue,
+            .AGAIN => return error.WouldBlock,
+            .BADF => return error.SocketNotConnected,
+            .INVAL => return error.InvalidArgument,
+            .NOTSOCK => return error.SocketNotConnected,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    }
+}
+
+fn originalDestinationFromControl(msg: *const std.posix.msghdr) !net.IpAddress {
+    const SOL_IP: c_int = 0;
+    const SOL_IPV6: c_int = 41;
+    const IP_RECVORIGDSTADDR: c_int = 20;
+    const IPV6_RECVORIGDSTADDR: c_int = 74;
+
+    var current = firstControlMessage(msg);
+    while (current) |cmsg| {
+        switch (cmsg.level) {
+            SOL_IP => if (cmsg.type == IP_RECVORIGDSTADDR) {
+                var storage: PosixAddress = undefined;
+                const data = controlMessageData(cmsg);
+                @memcpy(std.mem.asBytes(&storage.in), data[0..@sizeOf(std.posix.sockaddr.in)]);
+                return posixToIpAddress(&storage);
+            },
+            SOL_IPV6 => if (cmsg.type == IPV6_RECVORIGDSTADDR) {
+                var storage: PosixAddress = undefined;
+                const data = controlMessageData(cmsg);
+                @memcpy(std.mem.asBytes(&storage.in6), data[0..@sizeOf(std.posix.sockaddr.in6)]);
+                return posixToIpAddress(&storage);
+            },
+            else => {},
+        }
+        current = nextControlMessage(msg, cmsg);
+    }
+
+    return error.RedirectionOriginalDestinationMissing;
+}
+
+fn firstControlMessage(msg: *const std.posix.msghdr) ?*std.posix.cmsghdr {
+    const control = msg.control orelse return null;
+    if (msg.controllen < @sizeOf(std.posix.cmsghdr)) return null;
+    return @ptrCast(@alignCast(control));
+}
+
+fn nextControlMessage(msg: *const std.posix.msghdr, cmsg: *std.posix.cmsghdr) ?*std.posix.cmsghdr {
+    const base_raw: [*]u8 = @ptrCast(msg.control orelse return null);
+    const current_raw: [*]u8 = @ptrCast(cmsg);
+    const current_offset = @intFromPtr(current_raw) - @intFromPtr(base_raw);
+    const next_offset = current_offset + controlMessageAlign(cmsg.len);
+    if (next_offset + @sizeOf(std.posix.cmsghdr) > msg.controllen) return null;
+    return @ptrCast(@alignCast(base_raw + next_offset));
+}
+
+fn controlMessageData(cmsg: *const std.posix.cmsghdr) []const u8 {
+    const raw: [*]const u8 = @ptrCast(cmsg);
+    const offset = controlMessageAlign(@sizeOf(std.posix.cmsghdr));
+    const len = if (cmsg.len > offset) cmsg.len - offset else 0;
+    return raw[offset..][0..len];
+}
+
+fn controlMessageAlign(len: usize) usize {
+    const alignment = @sizeOf(usize);
+    return (len + alignment - 1) & ~(alignment - 1);
 }
 
 fn sendUdp(fd: std.posix.socket_t, packet: []const u8, address: net.IpAddress) !usize {

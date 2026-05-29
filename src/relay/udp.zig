@@ -15,6 +15,7 @@ const max_udp_packet_size = 64 * 1024;
 const ResponseStyle = enum {
     socks,
     raw,
+    redir,
 };
 
 const Association = struct {
@@ -30,6 +31,7 @@ const Association = struct {
     client_packet_id: u64,
     server_replay: replay.ReplayProtector,
     response_style: ResponseStyle,
+    response_socket: ?netio.UdpSocket = null,
     timeout_ns: i64,
     last_seen_ns: std.atomic.Value(i64),
     closed: std.atomic.Value(bool) = .init(false),
@@ -101,6 +103,77 @@ pub fn runLocal(
         const target_address = rewriteFakeDnsAddress(fake_dns_manager, io, parsed.header.address);
         const payload = packet[parsed.used..];
         const plain = try makeAddressPayload(allocator, target_address, payload);
+        defer allocator.free(plain);
+        const encrypted = try encryptClientUdpPacket(allocator, io, assoc, plain);
+        defer allocator.free(encrypted);
+        _ = try assoc.remote_socket.sendTo(encrypted, assoc.server_addr);
+    }
+}
+
+pub fn runLocalRedir(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    server_cfgs: []const config.Server,
+    server_next: *std.atomic.Value(usize),
+    local_cfg: config.Local,
+    udp_timeout_seconds: u64,
+    udp_max_associations: ?usize,
+) !void {
+    var local_socket = try netio.bindUdpRedirListen(local_cfg.host, local_cfg.port, local_cfg.udp_redir);
+    defer local_socket.close();
+
+    var associations = std.AutoHashMap(u64, *Association).init(allocator);
+    defer associations.deinit();
+    var retired = std.ArrayList(*Association).empty;
+    defer retired.deinit(allocator);
+
+    var buf: [max_udp_packet_size]u8 = undefined;
+    while (true) {
+        const received = try local_socket.receiveRedirFrom(&buf);
+        cleanupLocalAssociations(allocator, io, &associations, &retired, udp_timeout_seconds);
+        const packet = buf[0..received.len];
+
+        const key = addressPairHash(received.from, received.to);
+        const assoc = associations.get(key) orelse blk: {
+            if (udp_max_associations) |capacity| {
+                if (associations.count() >= capacity) continue;
+            }
+            const server_cfg = try selectUdpServer(server_cfgs, server_next);
+            const server_addr = try netio.resolveIp(server_cfg.host, server_cfg.port);
+            const remote_socket = try netio.openUdp(server_addr);
+            errdefer remote_socket.close();
+            const response_socket = try netio.bindUdpRedirResponse(received.to, local_cfg.udp_redir);
+            errdefer response_socket.close();
+
+            const assoc = try allocator.create(Association);
+            assoc.* = .{
+                .allocator = allocator,
+                .io = io,
+                .server_cfg = server_cfg,
+                .local_socket = local_socket,
+                .remote_socket = remote_socket,
+                .client_addr = received.from,
+                .server_addr = server_addr,
+                .master_key = [_]u8{0} ** 32,
+                .client_session_id = try randomNonZeroU64(io),
+                .client_packet_id = 0,
+                .server_replay = replay.ReplayProtector.init(allocator, 8192),
+                .response_style = .redir,
+                .response_socket = response_socket,
+                .timeout_ns = timeoutNs(udp_timeout_seconds),
+                .last_seen_ns = .init(nowNs(io)),
+            };
+            try crypto.deriveMasterKey(server_cfg.method, server_cfg.password, assoc.master_key[0..server_cfg.method.keyLen()]);
+            try associations.put(key, assoc);
+
+            const thread = try std.Thread.spawn(.{}, localResponseLoop, .{assoc});
+            thread.detach();
+            break :blk assoc;
+        };
+        assoc.last_seen_ns.store(nowNs(io), .release);
+
+        const target_address = try netio.ipToShadow(received.to);
+        const plain = try makeAddressPayload(allocator, target_address, packet);
         defer allocator.free(plain);
         const encrypted = try encryptClientUdpPacket(allocator, io, assoc, plain);
         defer allocator.free(encrypted);
@@ -624,8 +697,13 @@ fn localResponseLoop(assoc: *Association) void {
             .raw => {
                 _ = assoc.local_socket.sendTo(payload, assoc.client_addr) catch break;
             },
+            .redir => {
+                var response_socket = assoc.response_socket orelse break;
+                _ = response_socket.sendTo(payload, assoc.client_addr) catch break;
+            },
         }
     }
+    if (assoc.response_socket) |response_socket| response_socket.close();
     assoc.remote_socket.close();
     assoc.closed.store(true, .release);
 }
@@ -722,6 +800,15 @@ fn removeOldestServerAssociation(associations: *std.AutoHashMap(u64, ServerAssoc
     if (oldest_key) |key| _ = associations.remove(key);
 }
 
+fn addressPairHash(a: netio.net.IpAddress, b: netio.net.IpAddress) u64 {
+    var hasher = std.hash.Wyhash.init(0);
+    const a_hash = netio.addressHash(a);
+    const b_hash = netio.addressHash(b);
+    hasher.update(&std.mem.toBytes(a_hash));
+    hasher.update(&std.mem.toBytes(b_hash));
+    return hasher.final();
+}
+
 fn nowNs(io: std.Io) i64 {
     return @intCast(std.Io.Clock.awake.now(io).nanoseconds);
 }
@@ -784,4 +871,13 @@ test "server UDP associations expire and evict oldest" {
     removeOldestServerAssociation(&associations);
     try std.testing.expect(associations.contains(netio.addressHash(fresh)));
     try std.testing.expect(!associations.contains(netio.addressHash(oldest)));
+}
+
+test "address pair hash distinguishes redir destinations" {
+    const client = netio.net.IpAddress{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 2000 } };
+    const target_a = netio.net.IpAddress{ .ip4 = .{ .bytes = .{ 198, 51, 100, 1 }, .port = 80 } };
+    const target_b = netio.net.IpAddress{ .ip4 = .{ .bytes = .{ 198, 51, 100, 2 }, .port = 80 } };
+
+    try std.testing.expectEqual(addressPairHash(client, target_a), addressPairHash(client, target_a));
+    try std.testing.expect(addressPairHash(client, target_a) != addressPairHash(client, target_b));
 }

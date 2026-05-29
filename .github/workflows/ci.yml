@@ -48,10 +48,11 @@ jobs:
       - name: Config checks
         run: |
           zig-out/bin/ss-zig --check -c tests/aes-gcm-redir.json
+          zig-out/bin/ss-zig --check -c tests/aes-gcm-redir-udp.json
           zig-out/bin/ss-zig --check -c tests/aes-gcm-fake-dns.json
           zig-out/bin/ss-zig --check -c tests/aead2022-aes128-tcp.json
 
-      - name: Linux redir startup
+      - name: Linux TCP redir startup
         run: |
           set +e
           timeout 2s zig-out/bin/ss-zig --local -c tests/aes-gcm-redir.json
@@ -59,5 +60,16 @@ jobs:
           set -e
           if [ "$code" -ne 124 ]; then
             echo "expected redir local to start and wait for connections, got exit code $code" >&2
+            exit "$code"
+          fi
+
+      - name: Linux UDP redir startup
+        run: |
+          set +e
+          sudo timeout 2s zig-out/bin/ss-zig --local -c tests/aes-gcm-redir-udp.json
+          code=$?
+          set -e
+          if [ "$code" -ne 124 ]; then
+            echo "expected UDP redir local to start and wait for packets, got exit code $code" >&2
             exit "$code"
           fi

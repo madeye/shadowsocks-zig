@@ -25,11 +25,11 @@ Current state:
 - TCP and UDP tunnel local mode via `protocol = "tunnel"` with
   `forward_address` and `forward_port`, matching shadowsocks-rust's local
   tunnel configuration shape and libev `ss-tunnel` behavior.
-- TCP transparent redir local mode via `protocol = "redir"` with
+- TCP and UDP transparent redir local mode via `protocol = "redir"` with
   shadowsocks-rust-compatible `tcp_redir`/`udp_redir` config parsing. The
-  current relay wiring supports Linux TCP `redirect` and `tproxy` sockets
-  through the libuv-backed POSIX socket layer; UDP redir and BSD/macOS
-  `pf`/`ipfw` destination lookup are still pending.
+  current relay wiring supports Linux TCP `redirect`/`tproxy` and UDP `tproxy`
+  sockets through the libuv-backed POSIX socket layer; BSD/macOS `pf`/`ipfw`
+  destination lookup is still pending.
 - TCP and UDP DNS local mode via `protocol = "dns"` with
   `remote_dns_address`/`remote_dns_port` and optional
   `local_dns_address`/`local_dns_port`. DNS locals default to
@@ -226,9 +226,10 @@ Latest libuv/Zig 0.16 smoke checks:
   `fc00::/7`, and a SOCKS5 IPv6 CONNECT to that fake IPv6 was rewritten back to
   the same HTTP target.
 - Redir local config smoke: [tests/aes-gcm-redir.json](tests/aes-gcm-redir.json)
-  validates `protocol = "redir"` and `tcp_redir = "redirect"` with `--check`.
-  Live transparent redir requires Linux netfilter or TPROXY rules and was not
-  run on this macOS host.
+  and [tests/aes-gcm-redir-udp.json](tests/aes-gcm-redir-udp.json) validate
+  `protocol = "redir"`, `tcp_redir = "redirect"`, and `udp_redir = "tproxy"`
+  with `--check`. GitHub CI also starts Linux TCP redir and sudo-starts Linux
+  UDP TPROXY redir long enough to verify the sockets bind and wait for traffic.
 - Multi-instance smoke:
   [tests/aes-gcm-multi-local.json](tests/aes-gcm-multi-local.json) started one
   SOCKS local listener and one HTTP local listener in the same `--local`
@@ -245,5 +246,5 @@ Latest libuv/Zig 0.16 smoke checks:
 Remaining high-level port work:
 
 - Remaining specialized local protocol work from shadowsocks-rust/libev:
-  UDP redir, BSD/macOS redir backends, tun interfaces, and RocksDB-compatible
-  fake-DNS storage.
+  BSD/macOS redir backends, tun interfaces, and RocksDB-compatible fake-DNS
+  storage.

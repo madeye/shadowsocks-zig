@@ -117,11 +117,13 @@ before returning raw datagrams to the client.
 
 Redir local support follows shadowsocks-rust's `protocol = "redir"` config
 surface with `tcp_redir` and `udp_redir` values. The current implementation
-parses the upstream type names and wires Linux TCP `redirect`/`tproxy` into the
-same target relay used by tunnel mode: `redirect` retrieves the original
-destination with `SO_ORIGINAL_DST`, and `tproxy` uses the accepted socket local
-address after binding with `IP_TRANSPARENT`. UDP redir and BSD/macOS `pf`/`ipfw`
-destination lookup remain future work.
+parses the upstream type names and wires Linux TCP `redirect`/`tproxy` and UDP
+`tproxy` into the same target relay used by tunnel mode. TCP `redirect`
+retrieves the original destination with `SO_ORIGINAL_DST`, TCP `tproxy` uses
+the accepted socket local address after binding with `IP_TRANSPARENT`, and UDP
+`tproxy` receives original-destination control messages with `recvmsg` before
+sending responses from transparent sockets bound to the original destination.
+BSD/macOS `pf`/`ipfw` destination lookup remains future work.
 
 Fake-DNS local support follows shadowsocks-rust's `protocol = "fake-dns"`
 configuration keys for IPv4/IPv6 pools, database path, and record expiration.

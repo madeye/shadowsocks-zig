@@ -293,7 +293,7 @@ fn runLocalInstance(
 
     switch (local_cfg.protocol) {
         .tunnel => return try runTunnelLocal(allocator, io, selector, local_cfg, udp_timeout_seconds, udp_max_associations, acl_ptr),
-        .redir => return try runRedirLocal(allocator, io, selector, local_cfg, acl_ptr),
+        .redir => return try runRedirLocal(allocator, io, selector, local_cfg, udp_timeout_seconds, udp_max_associations, acl_ptr),
         .dns => return try runDnsLocal(allocator, io, selector, local_cfg, udp_timeout_seconds, udp_max_associations, acl_ptr),
         .fake_dns => return try runFakeDnsLocal(allocator, io, local_cfg, fake_dns_manager orelse return error.MissingFakeDnsManager),
         .socks, .http => {},
@@ -324,9 +324,26 @@ fn runRedirLocal(
     io: std.Io,
     selector: *ServerSelector,
     local_cfg: config.Local,
+    udp_timeout_seconds: u64,
+    udp_max_associations: ?usize,
     access_control: ?*const acl.AccessControl,
 ) !void {
-    if (local_cfg.mode.enableUdp()) return error.RedirectionUdpUnsupported;
+    if (local_cfg.mode.enableUdp()) {
+        if (local_cfg.mode.enableTcp()) {
+            const udp_thread = try std.Thread.spawn(.{}, udp.runLocalRedir, .{
+                allocator,
+                io,
+                selector.udp_servers,
+                &selector.udp_next,
+                local_cfg,
+                udp_timeout_seconds,
+                udp_max_associations,
+            });
+            udp_thread.detach();
+        } else {
+            return try udp.runLocalRedir(allocator, io, selector.udp_servers, &selector.udp_next, local_cfg, udp_timeout_seconds, udp_max_associations);
+        }
+    }
     if (!local_cfg.mode.enableTcp()) return;
 
     var listener = try netio.listenTcpRedir(local_cfg.host, local_cfg.port, local_cfg.tcp_redir);
