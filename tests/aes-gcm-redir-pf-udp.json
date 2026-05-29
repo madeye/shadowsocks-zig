@@ -1,0 +1,13 @@
+{
+  "mode": "tcp_and_udp",
+  "servers": [{ "server": "127.0.0.1", "server_port": 8388, "method": "aes-128-gcm", "password": "test" }],
+  "locals": [
+    {
+      "local_address": "127.0.0.1",
+      "local_port": 1099,
+      "protocol": "redir",
+      "mode": "udp_only",
+      "udp_redir": "pf"
+    }
+  ]
+}

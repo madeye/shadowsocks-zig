@@ -31,7 +31,9 @@ Current state:
   sockets through the libuv-backed POSIX socket layer. TCP `pf` is wired for
   macOS/iOS and FreeBSD through `/dev/pf` `DIOCNATLOOK`, OpenBSD `pf` uses the
   accepted socket local address, and TCP `ipfw` uses the socket local address
-  on macOS/iOS/FreeBSD. BSD/macOS UDP redir is still pending.
+  on macOS/iOS/FreeBSD. UDP `pf` on macOS/iOS binds normal UDP sockets and
+  recovers the original destination from `/dev/pf` state lookup. FreeBSD and
+  OpenBSD UDP redir remain pending.
 - TCP and UDP DNS local mode via `protocol = "dns"` with
   `remote_dns_address`/`remote_dns_port` and optional
   `local_dns_address`/`local_dns_port`. DNS locals default to
@@ -229,11 +231,12 @@ Latest libuv/Zig 0.16 smoke checks:
   the same HTTP target.
 - Redir local config smoke: [tests/aes-gcm-redir.json](tests/aes-gcm-redir.json),
   [tests/aes-gcm-redir-udp.json](tests/aes-gcm-redir-udp.json), and
-  [tests/aes-gcm-redir-pf.json](tests/aes-gcm-redir-pf.json) validate
+  [tests/aes-gcm-redir-pf.json](tests/aes-gcm-redir-pf.json), and
+  [tests/aes-gcm-redir-pf-udp.json](tests/aes-gcm-redir-pf-udp.json) validate
   `protocol = "redir"`, Linux `tcp_redir = "redirect"`, Linux
-  `udp_redir = "tproxy"`, and BSD/macOS `tcp_redir = "pf"` config with
-  `--check`. GitHub CI also starts Linux TCP redir and sudo-starts Linux UDP
-  TPROXY redir long enough to verify the sockets bind and wait for traffic.
+  `udp_redir = "tproxy"`, and BSD/macOS `pf` redir config with `--check`.
+  GitHub CI also starts Linux TCP redir and sudo-starts Linux UDP TPROXY redir
+  long enough to verify the sockets bind and wait for traffic.
 - Multi-instance smoke:
   [tests/aes-gcm-multi-local.json](tests/aes-gcm-multi-local.json) started one
   SOCKS local listener and one HTTP local listener in the same `--local`
@@ -249,6 +252,6 @@ Latest libuv/Zig 0.16 smoke checks:
 
 Remaining high-level port work:
 
-- Remaining specialized local protocol work from shadowsocks-rust/libev: live
-  BSD/macOS UDP redir, full BSD/macOS pf/ipfw integration tests with kernel
-  rules, tun interfaces, and RocksDB-compatible fake-DNS storage.
+- Remaining specialized local protocol work from shadowsocks-rust/libev:
+  FreeBSD/OpenBSD UDP redir, full BSD/macOS pf/ipfw integration tests with
+  kernel rules, tun interfaces, and RocksDB-compatible fake-DNS storage.

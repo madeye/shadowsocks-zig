@@ -126,8 +126,11 @@ sending responses from transparent sockets bound to the original destination.
 For BSD-style TCP redir, macOS/iOS and FreeBSD `pf` use `/dev/pf`
 `DIOCNATLOOK` with layouts pinned to shadowsocks-rust's bindgen output,
 OpenBSD `pf` uses the accepted socket local address, and `ipfw` uses the
-accepted socket local address on macOS/iOS/FreeBSD. BSD/macOS UDP redir remains
-future work.
+accepted socket local address on macOS/iOS/FreeBSD. For macOS/iOS UDP `pf`,
+the listener receives from a normal UDP socket and then scans `/dev/pf`
+`DIOCGETSTATES` state records to recover the original gateway destination,
+matching shadowsocks-rust's PacketFilter lookup strategy. FreeBSD/OpenBSD UDP
+redir remains future work.
 
 Fake-DNS local support follows shadowsocks-rust's `protocol = "fake-dns"`
 configuration keys for IPv4/IPv6 pools, database path, and record expiration.

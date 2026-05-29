@@ -75,6 +75,7 @@ pub const TcpStream = struct {
 
 pub const UdpSocket = struct {
     fd: std.posix.socket_t,
+    redir_type: config.RedirType = .not_supported,
 
     pub fn close(self: *const UdpSocket) void {
         closeFd(self.fd);
@@ -93,7 +94,7 @@ pub const UdpSocket = struct {
     pub fn receiveRedirFrom(self: *UdpSocket, out: []u8) !UdpRedirPacket {
         while (true) {
             if (!try libuv.waitReadable(self.fd, infinite_timeout_ms)) continue;
-            return recvUdpRedir(self.fd, out) catch |err| switch (err) {
+            return recvUdpRedir(self.fd, self.redir_type, out) catch |err| switch (err) {
                 error.WouldBlock => continue,
                 else => |e| return e,
             };
@@ -246,30 +247,54 @@ pub fn bindUdp(host: []const u8, port: u16) !UdpSocket {
 }
 
 pub fn bindUdpRedirListen(host: []const u8, port: u16, redir_type: config.RedirType) !UdpSocket {
-    if (redir_type != .tproxy) return error.RedirectionUnsupported;
-    if (builtin.os.tag != .linux) return error.RedirectionUnsupported;
-
     const address = try net.IpAddress.parse(host, port);
-    return try bindUdpAddress(address, .{
-        .transparent = true,
-        .receive_original_destination = true,
-    });
+    return switch (redir_type) {
+        .tproxy => {
+            if (builtin.os.tag != .linux) return error.RedirectionUnsupported;
+            var socket = try bindUdpAddress(address, .{
+                .transparent = true,
+                .receive_original_destination = true,
+            });
+            socket.redir_type = redir_type;
+            return socket;
+        },
+        .pf => {
+            if (builtin.os.tag != .macos and builtin.os.tag != .ios) return error.RedirectionUnsupported;
+            var socket = try bindUdpAddress(address, .{
+                .disable_fragmentation = true,
+            });
+            socket.redir_type = redir_type;
+            return socket;
+        },
+        else => error.RedirectionUnsupported,
+    };
 }
 
 pub fn bindUdpRedirResponse(address: net.IpAddress, redir_type: config.RedirType) !UdpSocket {
-    if (redir_type != .tproxy) return error.RedirectionUnsupported;
-    if (builtin.os.tag != .linux) return error.RedirectionUnsupported;
-
-    return try bindUdpAddress(address, .{
-        .transparent = true,
-        .reuse_port = true,
-    });
+    return switch (redir_type) {
+        .tproxy => {
+            if (builtin.os.tag != .linux) return error.RedirectionUnsupported;
+            return try bindUdpAddress(address, .{
+                .transparent = true,
+                .reuse_port = true,
+            });
+        },
+        .pf => {
+            if (builtin.os.tag != .macos and builtin.os.tag != .ios) return error.RedirectionUnsupported;
+            return try bindUdpAddress(address, .{
+                .disable_fragmentation = true,
+                .reuse_port = true,
+            });
+        },
+        else => error.RedirectionUnsupported,
+    };
 }
 
 const UdpBindOptions = struct {
     transparent: bool = false,
     receive_original_destination: bool = false,
     reuse_port: bool = false,
+    disable_fragmentation: bool = false,
 };
 
 fn bindUdpAddress(address: net.IpAddress, options: UdpBindOptions) !UdpSocket {
@@ -278,6 +303,7 @@ fn bindUdpAddress(address: net.IpAddress, options: UdpBindOptions) !UdpSocket {
     errdefer closeFd(fd);
     if (options.transparent) try setIpTransparent(fd, address);
     if (options.receive_original_destination) try setUdpOriginalDestinationOptions(fd, address);
+    if (options.disable_fragmentation) try setUdpDisableFragmentation(fd, address);
     try setNonblocking(fd);
     var one: c_int = 1;
     std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, std.mem.asBytes(&one)) catch {};
@@ -465,6 +491,25 @@ fn setUdpOriginalDestinationOptions(fd: std.posix.socket_t, address: net.IpAddre
     try std.posix.setsockopt(fd, mtu_opt[0], mtu_opt[1], std.mem.asBytes(&pmtu));
 }
 
+fn setUdpDisableFragmentation(fd: std.posix.socket_t, address: net.IpAddress) !void {
+    if (builtin.os.tag != .macos and builtin.os.tag != .ios) return error.RedirectionUnsupported;
+
+    const IPPROTO_IP: c_int = 0;
+    const IPPROTO_IPV6: c_int = 41;
+    const IP_DONTFRAG: u32 = 67;
+    const IPV6_DONTFRAG: u32 = 62;
+
+    const opt = switch (address) {
+        .ip4 => .{ IPPROTO_IP, IP_DONTFRAG },
+        .ip6 => .{ IPPROTO_IPV6, IPV6_DONTFRAG },
+    };
+    var one: c_int = 1;
+    std.posix.setsockopt(fd, opt[0], opt[1], std.mem.asBytes(&one)) catch |err| switch (err) {
+        error.InvalidProtocolOption => {},
+        else => |e| return e,
+    };
+}
+
 fn setNonblocking(fd: std.posix.socket_t) !void {
     while (true) {
         const rc = std.posix.system.fcntl(fd, std.posix.F.GETFL, @as(c_int, 0));
@@ -641,8 +686,18 @@ fn recvUdp(fd: std.posix.socket_t, out: []u8) !UdpPacket {
     }
 }
 
-fn recvUdpRedir(fd: std.posix.socket_t, out: []u8) anyerror!UdpRedirPacket {
-    if (builtin.os.tag != .linux) return error.RedirectionUnsupported;
+fn recvUdpRedir(fd: std.posix.socket_t, redir_type: config.RedirType, out: []u8) anyerror!UdpRedirPacket {
+    if (builtin.os.tag == .macos or builtin.os.tag == .ios) {
+        if (redir_type != .pf) return error.RedirectionUnsupported;
+        const packet = try recvUdp(fd, out);
+        return .{
+            .from = packet.from,
+            .to = try pfNatlookDarwinUdp(try socketLocalAddress(fd), packet.from),
+            .len = packet.len,
+        };
+    }
+
+    if (builtin.os.tag != .linux or redir_type != .tproxy) return error.RedirectionUnsupported;
 
     var source: PosixAddress = undefined;
     var iov = std.posix.iovec{ .base = out.ptr, .len = out.len };
@@ -878,6 +933,23 @@ const PfiocNatlookFreeBsd = extern struct {
     direction: u8,
 };
 
+const PfiocStates = extern struct {
+    ps_len: c_int,
+    ps_u: extern union {
+        psu_buf: [*]u8,
+    },
+};
+
+const darwin_pfsync_state_size = 297;
+const darwin_pfsync_lan_addr_offset = 24;
+const darwin_pfsync_lan_port_offset = 40;
+const darwin_pfsync_gwy_addr_offset = 48;
+const darwin_pfsync_gwy_port_offset = 64;
+const darwin_pfsync_ext_gwy_addr_offset = 96;
+const darwin_pfsync_ext_gwy_port_offset = 112;
+const darwin_pfsync_af_gwy_offset = 283;
+const darwin_pfsync_proto_offset = 284;
+
 fn pfNatlookDarwinTcp(fd: std.posix.socket_t) !net.IpAddress {
     if (builtin.os.tag != .macos and builtin.os.tag != .ios) return error.RedirectionUnsupported;
 
@@ -908,6 +980,82 @@ fn pfNatlookFreeBsdTcp(fd: std.posix.socket_t) !net.IpAddress {
     return pfNatlookResult(lookup.af, lookup.rdaddr, lookup.rdport);
 }
 
+fn pfNatlookDarwinUdp(bind_addr: net.IpAddress, peer_addr: net.IpAddress) !net.IpAddress {
+    if (builtin.os.tag != .macos and builtin.os.tag != .ios) return error.RedirectionUnsupported;
+
+    var bind_pf_addr: PfAddr = std.mem.zeroes(PfAddr);
+    var bind_port: u16 = 0;
+    var bind_family: u8 = 0;
+    try fillPfLookupAddress(&bind_pf_addr, &bind_port, &bind_family, bind_addr);
+
+    var peer_pf_addr: PfAddr = std.mem.zeroes(PfAddr);
+    var peer_port: u16 = 0;
+    var peer_family: u8 = 0;
+    try fillPfLookupAddress(&peer_pf_addr, &peer_port, &peer_family, peer_addr);
+    if (bind_family != peer_family) return error.AddressFamilyUnsupported;
+
+    const allocator = std.heap.smp_allocator;
+    var state_bytes = try allocator.alloc(u8, 8192);
+    defer allocator.free(state_bytes);
+
+    const fd = try std.posix.openatZ(std.posix.AT.FDCWD, "/dev/pf", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
+    defer closeFd(fd);
+
+    while (true) {
+        var states = PfiocStates{
+            .ps_len = @intCast(state_bytes.len),
+            .ps_u = .{ .psu_buf = state_bytes.ptr },
+        };
+        const req = ioctlReadWrite('D', 25, PfiocStates);
+        switch (std.posix.errno(std.c.ioctl(fd, req, &states))) {
+            .SUCCESS => {},
+            .ACCES, .PERM => return error.AccessDenied,
+            .BADF => return error.SocketNotConnected,
+            .INVAL => return error.RedirectionOriginalDestinationMissing,
+            .NOENT => return error.RedirectionOriginalDestinationMissing,
+            .NXIO => return error.RedirectionUnsupported,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+        if (states.ps_len <= state_bytes.len) {
+            const used = @as(usize, @intCast(states.ps_len));
+            return try pfNatlookDarwinUdpFromStates(
+                state_bytes[0..used],
+                bind_pf_addr,
+                std.mem.bigToNative(u16, bind_port),
+                peer_pf_addr,
+                std.mem.bigToNative(u16, peer_port),
+            );
+        }
+        state_bytes = try allocator.realloc(state_bytes, @intCast(states.ps_len));
+    }
+}
+
+fn pfNatlookDarwinUdpFromStates(
+    states: []const u8,
+    bind_addr: PfAddr,
+    bind_port: u16,
+    peer_addr: PfAddr,
+    peer_port: u16,
+) !net.IpAddress {
+    const IPPROTO_UDP: u8 = 17;
+    const count = states.len / darwin_pfsync_state_size;
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        const state = states[i * darwin_pfsync_state_size ..][0..darwin_pfsync_state_size];
+        if (state[darwin_pfsync_proto_offset] != IPPROTO_UDP) continue;
+        if (!std.mem.eql(u8, state[darwin_pfsync_lan_addr_offset..][0..16], std.mem.asBytes(&bind_addr.words))) continue;
+        if (!std.mem.eql(u8, state[darwin_pfsync_ext_gwy_addr_offset..][0..16], std.mem.asBytes(&peer_addr.words))) continue;
+        if (std.mem.readInt(u16, state[darwin_pfsync_lan_port_offset..][0..2], .native) != bind_port) continue;
+        if (std.mem.readInt(u16, state[darwin_pfsync_ext_gwy_port_offset..][0..2], .native) != peer_port) continue;
+
+        var actual_addr: PfAddr = std.mem.zeroes(PfAddr);
+        @memcpy(std.mem.asBytes(&actual_addr.words), state[darwin_pfsync_gwy_addr_offset..][0..16]);
+        const actual_port = std.mem.readInt(u16, state[darwin_pfsync_gwy_port_offset..][0..2], .native);
+        return pfNatlookResultHostPort(state[darwin_pfsync_af_gwy_offset], actual_addr, actual_port);
+    }
+    return error.RedirectionOriginalDestinationMissing;
+}
+
 fn fillPfLookupAddress(addr: *PfAddr, port: *u16, family: *u8, address: net.IpAddress) !void {
     switch (address) {
         .ip4 => |ip4| {
@@ -928,15 +1076,19 @@ fn fillPfLookupAddress(addr: *PfAddr, port: *u16, family: *u8, address: net.IpAd
 }
 
 fn pfNatlookResult(family: u8, addr: PfAddr, port: u16) !net.IpAddress {
+    return pfNatlookResultHostPort(family, addr, std.mem.bigToNative(u16, port));
+}
+
+fn pfNatlookResultHostPort(family: u8, addr: PfAddr, port: u16) !net.IpAddress {
     if (family == @as(u8, @intCast(std.posix.AF.INET))) {
         var bytes: [4]u8 = undefined;
         @memcpy(&bytes, std.mem.asBytes(&addr.words)[0..4]);
-        return .{ .ip4 = .{ .bytes = bytes, .port = std.mem.bigToNative(u16, port) } };
+        return .{ .ip4 = .{ .bytes = bytes, .port = port } };
     }
     if (family == @as(u8, @intCast(std.posix.AF.INET6))) {
         var bytes: [16]u8 = undefined;
         @memcpy(&bytes, std.mem.asBytes(&addr.words)[0..16]);
-        return .{ .ip6 = .{ .bytes = bytes, .port = std.mem.bigToNative(u16, port), .interface = .none } };
+        return .{ .ip6 = .{ .bytes = bytes, .port = port, .interface = .none } };
     }
     return error.UnsupportedAddressFamily;
 }
@@ -1000,6 +1152,16 @@ test "pf natlook ABI layouts match upstream bindgen" {
     try std.testing.expectEqual(@as(usize, 70), @offsetOf(PfiocNatlookFreeBsd, "rdport"));
     try std.testing.expectEqual(@as(usize, 72), @offsetOf(PfiocNatlookFreeBsd, "af"));
     try std.testing.expectEqual(@as(usize, 74), @offsetOf(PfiocNatlookFreeBsd, "direction"));
+
+    try std.testing.expectEqual(@as(usize, 16), @sizeOf(PfiocStates));
+    try std.testing.expectEqual(@as(usize, 8), @alignOf(PfiocStates));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(PfiocStates, "ps_u"));
+    try std.testing.expectEqual(@as(usize, 297), darwin_pfsync_state_size);
+    try std.testing.expectEqual(@as(usize, 24), darwin_pfsync_lan_addr_offset);
+    try std.testing.expectEqual(@as(usize, 48), darwin_pfsync_gwy_addr_offset);
+    try std.testing.expectEqual(@as(usize, 96), darwin_pfsync_ext_gwy_addr_offset);
+    try std.testing.expectEqual(@as(usize, 283), darwin_pfsync_af_gwy_offset);
+    try std.testing.expectEqual(@as(usize, 284), darwin_pfsync_proto_offset);
 }
 
 test "pf natlook address helpers preserve bytes and network order ports" {
@@ -1014,4 +1176,40 @@ test "pf natlook address helpers preserve bytes and network order ports" {
 
     const restored = try pfNatlookResult(family, addr, port);
     try std.testing.expect(restored.eql(&.{ .ip4 = .{ .bytes = .{ 192, 0, 2, 10 }, .port = 5353 } }));
+}
+
+test "darwin pf UDP state parser recovers gateway destination" {
+    var bind_addr: PfAddr = std.mem.zeroes(PfAddr);
+    var bind_port_be: u16 = 0;
+    var bind_family: u8 = 0;
+    try fillPfLookupAddress(&bind_addr, &bind_port_be, &bind_family, .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 1097 } });
+
+    var peer_addr: PfAddr = std.mem.zeroes(PfAddr);
+    var peer_port_be: u16 = 0;
+    var peer_family: u8 = 0;
+    try fillPfLookupAddress(&peer_addr, &peer_port_be, &peer_family, .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 2 }, .port = 53000 } });
+
+    var actual_addr: PfAddr = std.mem.zeroes(PfAddr);
+    var actual_port_be: u16 = 0;
+    var actual_family: u8 = 0;
+    try fillPfLookupAddress(&actual_addr, &actual_port_be, &actual_family, .{ .ip4 = .{ .bytes = .{ 198, 51, 100, 7 }, .port = 53 } });
+
+    var state = [_]u8{0} ** darwin_pfsync_state_size;
+    @memcpy(state[darwin_pfsync_lan_addr_offset..][0..16], std.mem.asBytes(&bind_addr.words));
+    @memcpy(state[darwin_pfsync_ext_gwy_addr_offset..][0..16], std.mem.asBytes(&peer_addr.words));
+    @memcpy(state[darwin_pfsync_gwy_addr_offset..][0..16], std.mem.asBytes(&actual_addr.words));
+    std.mem.writeInt(u16, state[darwin_pfsync_lan_port_offset..][0..2], std.mem.bigToNative(u16, bind_port_be), .native);
+    std.mem.writeInt(u16, state[darwin_pfsync_ext_gwy_port_offset..][0..2], std.mem.bigToNative(u16, peer_port_be), .native);
+    std.mem.writeInt(u16, state[darwin_pfsync_gwy_port_offset..][0..2], std.mem.bigToNative(u16, actual_port_be), .native);
+    state[darwin_pfsync_af_gwy_offset] = actual_family;
+    state[darwin_pfsync_proto_offset] = 17;
+
+    const restored = try pfNatlookDarwinUdpFromStates(
+        &state,
+        bind_addr,
+        std.mem.bigToNative(u16, bind_port_be),
+        peer_addr,
+        std.mem.bigToNative(u16, peer_port_be),
+    );
+    try std.testing.expect(restored.eql(&.{ .ip4 = .{ .bytes = .{ 198, 51, 100, 7 }, .port = 53 } }));
 }
