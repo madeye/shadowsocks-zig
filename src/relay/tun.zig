@@ -13,6 +13,7 @@ const net = std.Io.net;
 const ipv4_header_len = 20;
 const ipv6_header_len = 40;
 const udp_header_len = 8;
+const tcp_header_min_len = 20;
 const max_tun_packet_size = 64 * 1024;
 const infinite_timeout_ms = std.math.maxInt(u64);
 
@@ -63,6 +64,53 @@ pub const UdpPacket = struct {
     version: IpVersion,
     source: net.IpAddress,
     destination: net.IpAddress,
+    payload: []const u8,
+};
+
+pub const TcpFlags = struct {
+    fin: bool = false,
+    syn: bool = false,
+    rst: bool = false,
+    psh: bool = false,
+    ack: bool = false,
+    urg: bool = false,
+    ece: bool = false,
+    cwr: bool = false,
+
+    fn fromByte(byte: u8) TcpFlags {
+        return .{
+            .fin = byte & 0x01 != 0,
+            .syn = byte & 0x02 != 0,
+            .rst = byte & 0x04 != 0,
+            .psh = byte & 0x08 != 0,
+            .ack = byte & 0x10 != 0,
+            .urg = byte & 0x20 != 0,
+            .ece = byte & 0x40 != 0,
+            .cwr = byte & 0x80 != 0,
+        };
+    }
+
+    fn toByte(self: TcpFlags) u8 {
+        return @as(u8, @intFromBool(self.fin)) |
+            (@as(u8, @intFromBool(self.syn)) << 1) |
+            (@as(u8, @intFromBool(self.rst)) << 2) |
+            (@as(u8, @intFromBool(self.psh)) << 3) |
+            (@as(u8, @intFromBool(self.ack)) << 4) |
+            (@as(u8, @intFromBool(self.urg)) << 5) |
+            (@as(u8, @intFromBool(self.ece)) << 6) |
+            (@as(u8, @intFromBool(self.cwr)) << 7);
+    }
+};
+
+pub const TcpPacket = struct {
+    version: IpVersion,
+    source: net.IpAddress,
+    destination: net.IpAddress,
+    sequence_number: u32,
+    acknowledgment_number: u32,
+    flags: TcpFlags,
+    window_size: u16,
+    options: []const u8,
     payload: []const u8,
 };
 
@@ -898,6 +946,39 @@ pub fn parseUdpPacket(packet: []const u8) !?UdpPacket {
     };
 }
 
+pub fn parseTcpPacket(packet: []const u8) !?TcpPacket {
+    const ip = (try parseIpPacket(packet)) orelse return null;
+    if (ip.protocol != .tcp) return null;
+    if (ip.payload.len < tcp_header_min_len) return error.InvalidTunPacket;
+
+    const header_len = @as(usize, ip.payload[12] >> 4) * 4;
+    if (header_len < tcp_header_min_len or header_len > ip.payload.len) return error.InvalidTunPacket;
+    if (transportChecksum(ip.source, ip.destination, .tcp, ip.payload) != 0) return error.InvalidTunPacket;
+
+    var source = ip.source;
+    var destination = ip.destination;
+    switch (source) {
+        .ip4 => |*ip4| ip4.port = std.mem.readInt(u16, ip.payload[0..2], .big),
+        .ip6 => |*ip6| ip6.port = std.mem.readInt(u16, ip.payload[0..2], .big),
+    }
+    switch (destination) {
+        .ip4 => |*ip4| ip4.port = std.mem.readInt(u16, ip.payload[2..4], .big),
+        .ip6 => |*ip6| ip6.port = std.mem.readInt(u16, ip.payload[2..4], .big),
+    }
+
+    return .{
+        .version = ip.version,
+        .source = source,
+        .destination = destination,
+        .sequence_number = std.mem.readInt(u32, ip.payload[4..8], .big),
+        .acknowledgment_number = std.mem.readInt(u32, ip.payload[8..12], .big),
+        .flags = TcpFlags.fromByte(ip.payload[13]),
+        .window_size = std.mem.readInt(u16, ip.payload[14..16], .big),
+        .options = ip.payload[tcp_header_min_len..header_len],
+        .payload = ip.payload[header_len..],
+    };
+}
+
 pub fn buildUdpPacket(out: []u8, source: net.IpAddress, destination: net.IpAddress, payload: []const u8) ![]u8 {
     return switch (source) {
         .ip4 => switch (destination) {
@@ -907,6 +988,28 @@ pub fn buildUdpPacket(out: []u8, source: net.IpAddress, destination: net.IpAddre
         .ip6 => switch (destination) {
             .ip4 => error.AddressFamilyMismatch,
             .ip6 => try buildIpv6UdpPacket(out, source, destination, payload),
+        },
+    };
+}
+
+pub fn buildTcpPacket(
+    out: []u8,
+    source: net.IpAddress,
+    destination: net.IpAddress,
+    sequence_number: u32,
+    acknowledgment_number: u32,
+    flags: TcpFlags,
+    window_size: u16,
+    payload: []const u8,
+) ![]u8 {
+    return switch (source) {
+        .ip4 => switch (destination) {
+            .ip4 => try buildIpv4TcpPacket(out, source, destination, sequence_number, acknowledgment_number, flags, window_size, payload),
+            .ip6 => error.AddressFamilyMismatch,
+        },
+        .ip6 => switch (destination) {
+            .ip4 => error.AddressFamilyMismatch,
+            .ip6 => try buildIpv6TcpPacket(out, source, destination, sequence_number, acknowledgment_number, flags, window_size, payload),
         },
     };
 }
@@ -976,6 +1079,41 @@ fn buildIpv4UdpPacket(out: []u8, source: net.IpAddress, destination: net.IpAddre
     return out[0..total_len];
 }
 
+fn buildIpv4TcpPacket(
+    out: []u8,
+    source: net.IpAddress,
+    destination: net.IpAddress,
+    sequence_number: u32,
+    acknowledgment_number: u32,
+    flags: TcpFlags,
+    window_size: u16,
+    payload: []const u8,
+) ![]u8 {
+    const tcp_len = tcp_header_min_len + payload.len;
+    const total_len = ipv4_header_len + tcp_len;
+    if (total_len > out.len or total_len > std.math.maxInt(u16)) return error.PacketTooLarge;
+    const ip4_source = source.ip4;
+    const ip4_destination = destination.ip4;
+
+    @memset(out[0..total_len], 0);
+    out[0] = 0x45;
+    std.mem.writeInt(u16, out[2..4], @intCast(total_len), .big);
+    out[8] = 64;
+    out[9] = @intFromEnum(IpProtocol.tcp);
+    @memcpy(out[12..16], &ip4_source.bytes);
+    @memcpy(out[16..20], &ip4_destination.bytes);
+    std.mem.writeInt(u16, out[10..12], internetChecksum(out[0..ipv4_header_len]), .big);
+
+    const tcp = out[ipv4_header_len..total_len];
+    writeTcpHeader(tcp[0..tcp_header_min_len], source, destination, sequence_number, acknowledgment_number, flags, window_size);
+    @memcpy(tcp[tcp_header_min_len..], payload);
+    var checksum = transportChecksum(source, destination, .tcp, tcp);
+    if (checksum == 0) checksum = 0xffff;
+    std.mem.writeInt(u16, tcp[16..18], checksum, .big);
+
+    return out[0..total_len];
+}
+
 fn buildIpv6UdpPacket(out: []u8, source: net.IpAddress, destination: net.IpAddress, payload: []const u8) ![]u8 {
     const total_len = ipv6_header_len + udp_header_len + payload.len;
     if (total_len > out.len or udp_header_len + payload.len > std.math.maxInt(u16)) return error.PacketTooLarge;
@@ -1003,26 +1141,88 @@ fn buildIpv6UdpPacket(out: []u8, source: net.IpAddress, destination: net.IpAddre
     return out[0..total_len];
 }
 
+fn buildIpv6TcpPacket(
+    out: []u8,
+    source: net.IpAddress,
+    destination: net.IpAddress,
+    sequence_number: u32,
+    acknowledgment_number: u32,
+    flags: TcpFlags,
+    window_size: u16,
+    payload: []const u8,
+) ![]u8 {
+    const tcp_len = tcp_header_min_len + payload.len;
+    const total_len = ipv6_header_len + tcp_len;
+    if (total_len > out.len or tcp_len > std.math.maxInt(u16)) return error.PacketTooLarge;
+    const ip6_source = source.ip6;
+    const ip6_destination = destination.ip6;
+
+    @memset(out[0..total_len], 0);
+    out[0] = 0x60;
+    std.mem.writeInt(u16, out[4..6], @intCast(tcp_len), .big);
+    out[6] = @intFromEnum(IpProtocol.tcp);
+    out[7] = 64;
+    @memcpy(out[8..24], &ip6_source.bytes);
+    @memcpy(out[24..40], &ip6_destination.bytes);
+
+    const tcp = out[ipv6_header_len..total_len];
+    writeTcpHeader(tcp[0..tcp_header_min_len], source, destination, sequence_number, acknowledgment_number, flags, window_size);
+    @memcpy(tcp[tcp_header_min_len..], payload);
+    var checksum = transportChecksum(source, destination, .tcp, tcp);
+    if (checksum == 0) checksum = 0xffff;
+    std.mem.writeInt(u16, tcp[16..18], checksum, .big);
+
+    return out[0..total_len];
+}
+
+fn writeTcpHeader(
+    tcp: []u8,
+    source: net.IpAddress,
+    destination: net.IpAddress,
+    sequence_number: u32,
+    acknowledgment_number: u32,
+    flags: TcpFlags,
+    window_size: u16,
+) void {
+    std.mem.writeInt(u16, tcp[0..2], switch (source) {
+        .ip4 => |ip4| ip4.port,
+        .ip6 => |ip6| ip6.port,
+    }, .big);
+    std.mem.writeInt(u16, tcp[2..4], switch (destination) {
+        .ip4 => |ip4| ip4.port,
+        .ip6 => |ip6| ip6.port,
+    }, .big);
+    std.mem.writeInt(u32, tcp[4..8], sequence_number, .big);
+    std.mem.writeInt(u32, tcp[8..12], acknowledgment_number, .big);
+    tcp[12] = @as(u8, tcp_header_min_len / 4) << 4;
+    tcp[13] = flags.toByte();
+    std.mem.writeInt(u16, tcp[14..16], window_size, .big);
+}
+
 fn udpChecksum(source: net.IpAddress, destination: net.IpAddress, udp: []const u8) u16 {
+    return transportChecksum(source, destination, .udp, udp);
+}
+
+fn transportChecksum(source: net.IpAddress, destination: net.IpAddress, protocol: IpProtocol, segment: []const u8) u16 {
     var sum: u32 = 0;
     switch (source) {
         .ip4 => |src| {
             const dst = destination.ip4;
             sum = checksumAdd(sum, &src.bytes);
             sum = checksumAdd(sum, &dst.bytes);
-            sum += @intFromEnum(IpProtocol.udp);
-            sum += @intCast(udp.len);
+            sum += @intFromEnum(protocol);
+            sum += @intCast(segment.len);
         },
         .ip6 => |src| {
             const dst = destination.ip6;
             sum = checksumAdd(sum, &src.bytes);
             sum = checksumAdd(sum, &dst.bytes);
-            sum += @intCast((udp.len >> 16) & 0xffff);
-            sum += @intCast(udp.len & 0xffff);
-            sum += @intFromEnum(IpProtocol.udp);
+            sum += @intCast((segment.len >> 16) & 0xffff);
+            sum += @intCast(segment.len & 0xffff);
+            sum += @intFromEnum(protocol);
         },
     }
-    sum = checksumAdd(sum, udp);
+    sum = checksumAdd(sum, segment);
     return finalizeChecksum(sum);
 }
 
@@ -1269,6 +1469,53 @@ test "tun parses synthesized IPv6 UDP packet" {
     try std.testing.expectEqualStrings("hello-v6", udp.payload);
 }
 
+test "tun parses synthesized IPv4 TCP packet" {
+    var buf: [1500]u8 = undefined;
+    const source = try net.IpAddress.parse("192.0.2.10", 53000);
+    const destination = try net.IpAddress.parse("198.51.100.20", 443);
+    const packet = try buildTcpPacket(&buf, source, destination, 100, 200, .{ .syn = true, .ack = true }, 4096, "payload");
+
+    const ip = (try parseIpPacket(packet)).?;
+    try std.testing.expectEqual(IpVersion.ipv4, ip.version);
+    try std.testing.expectEqual(IpProtocol.tcp, ip.protocol);
+    try std.testing.expectEqual(@as(u8, 6), ip.protocol_number);
+
+    const tcp = (try parseTcpPacket(packet)).?;
+    try std.testing.expectEqual(source, tcp.source);
+    try std.testing.expectEqual(destination, tcp.destination);
+    try std.testing.expectEqual(@as(u32, 100), tcp.sequence_number);
+    try std.testing.expectEqual(@as(u32, 200), tcp.acknowledgment_number);
+    try std.testing.expect(tcp.flags.syn);
+    try std.testing.expect(tcp.flags.ack);
+    try std.testing.expect(!tcp.flags.fin);
+    try std.testing.expectEqual(@as(u16, 4096), tcp.window_size);
+    try std.testing.expectEqual(@as(usize, 0), tcp.options.len);
+    try std.testing.expectEqualStrings("payload", tcp.payload);
+}
+
+test "tun parses synthesized IPv6 TCP packet" {
+    var buf: [1500]u8 = undefined;
+    const source = try net.IpAddress.parse("2001:db8::1", 53000);
+    const destination = try net.IpAddress.parse("2001:db8::2", 443);
+    const packet = try buildTcpPacket(&buf, source, destination, 300, 400, .{ .psh = true, .ack = true }, 8192, "v6-payload");
+
+    const ip = (try parseIpPacket(packet)).?;
+    try std.testing.expectEqual(IpVersion.ipv6, ip.version);
+    try std.testing.expectEqual(IpProtocol.tcp, ip.protocol);
+    try std.testing.expectEqual(@as(u8, 6), ip.protocol_number);
+
+    const tcp = (try parseTcpPacket(packet)).?;
+    try std.testing.expectEqual(source, tcp.source);
+    try std.testing.expectEqual(destination, tcp.destination);
+    try std.testing.expectEqual(@as(u32, 300), tcp.sequence_number);
+    try std.testing.expectEqual(@as(u32, 400), tcp.acknowledgment_number);
+    try std.testing.expect(tcp.flags.psh);
+    try std.testing.expect(tcp.flags.ack);
+    try std.testing.expect(!tcp.flags.syn);
+    try std.testing.expectEqual(@as(u16, 8192), tcp.window_size);
+    try std.testing.expectEqualStrings("v6-payload", tcp.payload);
+}
+
 test "tun rejects fragmented IPv4 UDP packet" {
     var buf: [1500]u8 = undefined;
     const source = try net.IpAddress.parse("192.0.2.10", 53000);
@@ -1279,6 +1526,16 @@ test "tun rejects fragmented IPv4 UDP packet" {
     std.mem.writeInt(u16, buf[10..12], internetChecksum(packet[0..ipv4_header_len]), .big);
 
     try std.testing.expectError(error.UnsupportedTunFragment, parseIpPacket(packet));
+}
+
+test "tun rejects TCP packet with invalid checksum" {
+    var buf: [1500]u8 = undefined;
+    const source = try net.IpAddress.parse("192.0.2.10", 53000);
+    const destination = try net.IpAddress.parse("198.51.100.20", 443);
+    const packet = try buildTcpPacket(&buf, source, destination, 100, 0, .{ .syn = true }, 4096, "");
+    buf[ipv4_header_len + 19] ^= 0x01;
+
+    try std.testing.expectError(error.InvalidTunPacket, parseTcpPacket(packet));
 }
 
 test "tun UDP association encrypts outbound packet with target address" {

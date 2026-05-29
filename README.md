@@ -50,7 +50,7 @@ Current state:
 - Tun local config compatibility via `protocol = "tun"` with
   `tun_interface_name`, `tun_interface_address`,
   `tun_interface_destination`, and `tun_device_fd_from_path`. The relay layer
-  now has an explicit tun dispatch path plus IPv4/IPv6 UDP packet
+  now has an explicit tun dispatch path plus IPv4/IPv6 UDP and TCP packet
   parse/synthesis helpers, a Shadowsocks UDP association bridge, and Linux
   `/dev/net/tun` open/read/write plumbing through libuv readiness waits. Unix
   `tun_device_fd_from_path` now binds a stream socket and receives a TUN file
@@ -59,8 +59,9 @@ Current state:
   Shadowsocks server, and server replies are written back as synthesized IP
   packets. TUN UDP target handling now applies fake-DNS rewrites and outbound
   ACL blocking before encryption, and ACL-bypassed UDP targets are sent
-  directly with synthesized responses written back to the TUN device. The
-  virtual TCP state machine is still remaining work.
+  directly with synthesized responses written back to the TUN device. TCP
+  packets are parsed and synthesized with checksum validation; the virtual TCP
+  stream state machine is still remaining work.
 - TCP `ss-server` path for supported ciphers.
 - UDP `ss-local` SOCKS5 UDP ASSOCIATE path for supported ciphers.
 - UDP `ss-server` path for supported ciphers.
