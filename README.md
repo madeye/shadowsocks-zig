@@ -58,8 +58,9 @@ Current state:
   Linux tun UDP packets are read from the device, encrypted to the selected
   Shadowsocks server, and server replies are written back as synthesized IP
   packets. TUN UDP target handling now applies fake-DNS rewrites and outbound
-  ACL blocking before encryption. The virtual TCP state machine and direct
-  ACL-bypass forwarding are still remaining work.
+  ACL blocking before encryption, and ACL-bypassed UDP targets are sent
+  directly with synthesized responses written back to the TUN device. The
+  virtual TCP state machine is still remaining work.
 - TCP `ss-server` path for supported ciphers.
 - UDP `ss-local` SOCKS5 UDP ASSOCIATE path for supported ciphers.
 - UDP `ss-server` path for supported ciphers.

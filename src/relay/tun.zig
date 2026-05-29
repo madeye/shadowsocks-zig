@@ -241,6 +241,22 @@ const RuntimeUdpAssociation = struct {
     }
 };
 
+const DirectRuntimeUdpAssociation = struct {
+    io: std.Io,
+    remote_socket: netio.UdpSocket,
+    target_addr: net.IpAddress,
+    response_source_override: ?net.IpAddress,
+    client_addr: net.IpAddress,
+    tun_fd: std.posix.fd_t,
+    timeout_ns: i64,
+    last_seen_ns: std.atomic.Value(i64),
+    closed: std.atomic.Value(bool) = .init(false),
+
+    fn deinit(self: *DirectRuntimeUdpAssociation) void {
+        self.* = undefined;
+    }
+};
+
 const UnixAddress = extern union {
     any: std.posix.sockaddr,
     un: std.posix.sockaddr.un,
@@ -309,19 +325,30 @@ fn runDeviceLoop(
         }
         udp_associations.deinit();
     }
+    var direct_udp_associations = std.AutoHashMap(u64, *DirectRuntimeUdpAssociation).init(allocator);
+    defer {
+        var it = direct_udp_associations.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.*.closed.store(true, .release);
+        }
+        direct_udp_associations.deinit();
+    }
     var retired = std.ArrayList(*RuntimeUdpAssociation).empty;
     defer retired.deinit(allocator);
+    var direct_retired = std.ArrayList(*DirectRuntimeUdpAssociation).empty;
+    defer direct_retired.deinit(allocator);
 
     var packet: [max_tun_packet_size]u8 = undefined;
     while (true) {
         const n = try device.read(&packet);
         cleanupRuntimeUdpAssociations(allocator, io, &udp_associations, &retired, udp_timeout_seconds);
+        cleanupDirectRuntimeUdpAssociations(allocator, io, &direct_udp_associations, &direct_retired, udp_timeout_seconds);
         const ip_packet = (try parseIpPacket(packet[0..n])) orelse continue;
         switch (ip_packet.protocol) {
             .udp => {
                 if (!local_cfg.mode.enableUdp()) continue;
                 const udp_packet = (try parseUdpPacket(packet[0..n])) orelse continue;
-                try handleTunUdpPacket(allocator, io, device, udp_servers, udp_next, udp_timeout_seconds, udp_max_associations, access_control, fake_dns_manager, &udp_associations, udp_packet);
+                try handleTunUdpPacket(allocator, io, device, udp_servers, udp_next, udp_timeout_seconds, udp_max_associations, access_control, fake_dns_manager, &udp_associations, &direct_udp_associations, udp_packet);
             },
             .tcp, .icmp, .icmpv6 => {
                 if (local_cfg.mode.enableTcp()) {
@@ -344,15 +371,19 @@ fn handleTunUdpPacket(
     access_control: ?*const acl.AccessControl,
     fake_dns_manager: ?*fake_dns.Manager,
     associations: *std.AutoHashMap(u64, *RuntimeUdpAssociation),
+    direct_associations: *std.AutoHashMap(u64, *DirectRuntimeUdpAssociation),
     packet: UdpPacket,
 ) !void {
     const target = try tunUdpTarget(io, fake_dns_manager, packet);
     if (outboundBlocked(access_control, io, target.address)) return;
+    if (targetBypassed(access_control, io, target.address)) {
+        return try handleTunDirectUdpPacket(allocator, io, device, udp_timeout_seconds, udp_max_associations, associations.count(), direct_associations, packet, target);
+    }
 
     const key = addressPairHash(packet.source, packet.destination);
     const assoc = associations.get(key) orelse blk: {
         if (udp_max_associations) |capacity| {
-            if (associations.count() >= capacity) return;
+            if (associations.count() + direct_associations.count() >= capacity) return;
         }
         const server_cfg = try selectUdpServer(udp_servers, udp_next);
         const server_addr = try netio.resolveIp(server_cfg.host, server_cfg.port);
@@ -383,6 +414,50 @@ fn handleTunUdpPacket(
     _ = try assoc.remote_socket.sendTo(encrypted, assoc.server_addr);
 }
 
+fn handleTunDirectUdpPacket(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    device: *Device,
+    udp_timeout_seconds: u64,
+    udp_max_associations: ?usize,
+    proxied_count: usize,
+    direct_associations: *std.AutoHashMap(u64, *DirectRuntimeUdpAssociation),
+    packet: UdpPacket,
+    target: TunUdpTarget,
+) !void {
+    const target_addr = netio.shadowToIp(target.address) catch return;
+    const key = addressPairHash(packet.source, packet.destination);
+    const assoc = direct_associations.get(key) orelse blk: {
+        if (udp_max_associations) |capacity| {
+            if (proxied_count + direct_associations.count() >= capacity) return;
+        }
+        const remote_socket = try netio.openUdp(target_addr);
+        errdefer remote_socket.close();
+
+        const assoc = try allocator.create(DirectRuntimeUdpAssociation);
+        errdefer allocator.destroy(assoc);
+        assoc.* = .{
+            .io = io,
+            .remote_socket = remote_socket,
+            .target_addr = target_addr,
+            .response_source_override = target.response_source_override,
+            .client_addr = packet.source,
+            .tun_fd = device.fd,
+            .timeout_ns = timeoutNs(udp_timeout_seconds),
+            .last_seen_ns = .init(nowNs(io)),
+        };
+        try direct_associations.put(key, assoc);
+
+        const thread = try std.Thread.spawn(.{}, tunDirectUdpResponseLoop, .{assoc});
+        thread.detach();
+        break :blk assoc;
+    };
+    assoc.target_addr = target_addr;
+    assoc.response_source_override = target.response_source_override;
+    assoc.last_seen_ns.store(nowNs(io), .release);
+    _ = try assoc.remote_socket.sendTo(packet.payload, assoc.target_addr);
+}
+
 fn tunUdpResponseLoop(assoc: *RuntimeUdpAssociation) void {
     var encrypted_buf: [max_tun_packet_size]u8 = undefined;
     var packet_buf: [max_tun_packet_size]u8 = undefined;
@@ -395,6 +470,24 @@ fn tunUdpResponseLoop(assoc: *RuntimeUdpAssociation) void {
         const received = (assoc.remote_socket.receiveFromTimeout(&encrypted_buf, wait_ms) catch break) orelse continue;
         if (!netio.eqlAddress(received.from, assoc.server_addr)) continue;
         const packet = assoc.udp.decryptPacket(encrypted_buf[0..received.len], &packet_buf) catch continue;
+        writeAllFd(assoc.tun_fd, packet) catch break;
+    }
+    assoc.remote_socket.close();
+    assoc.closed.store(true, .release);
+}
+
+fn tunDirectUdpResponseLoop(assoc: *DirectRuntimeUdpAssociation) void {
+    var response_buf: [max_tun_packet_size]u8 = undefined;
+    var packet_buf: [max_tun_packet_size]u8 = undefined;
+    while (true) {
+        if (assoc.closed.load(.acquire)) break;
+        const now = nowNs(assoc.io);
+        const idle_ns = now - assoc.last_seen_ns.load(.acquire);
+        if (idle_ns >= assoc.timeout_ns) break;
+        const wait_ms: u64 = @intCast(@max(@min(@divTrunc(assoc.timeout_ns - idle_ns, std.time.ns_per_ms), 1000), 1));
+        const received = (assoc.remote_socket.receiveFromTimeout(&response_buf, wait_ms) catch break) orelse continue;
+        if (!netio.eqlAddress(received.from, assoc.target_addr)) continue;
+        const packet = buildDirectUdpResponsePacket(&packet_buf, assoc.client_addr, received.from, assoc.response_source_override, response_buf[0..received.len]) catch continue;
         writeAllFd(assoc.tun_fd, packet) catch break;
     }
     assoc.remote_socket.close();
@@ -436,6 +529,15 @@ fn outboundBlocked(access_control: ?*const acl.AccessControl, io: std.Io, addres
     return active_acl.outboundBlocked(io, address);
 }
 
+fn targetBypassed(access_control: ?*const acl.AccessControl, io: std.Io, address: ss_address.Address) bool {
+    const active_acl = access_control orelse return false;
+    return !active_acl.shouldProxy(io, address);
+}
+
+fn buildDirectUdpResponsePacket(out: []u8, client_addr: net.IpAddress, source_addr: net.IpAddress, source_override: ?net.IpAddress, payload: []const u8) ![]u8 {
+    return try buildUdpPacket(out, source_override orelse source_addr, client_addr, payload);
+}
+
 fn addressPairHash(a: net.IpAddress, b: net.IpAddress) u64 {
     var hasher = std.hash.Wyhash.init(0);
     hasher.update(&std.mem.toBytes(netio.addressHash(a)));
@@ -448,6 +550,46 @@ fn cleanupRuntimeUdpAssociations(
     io: std.Io,
     associations: *std.AutoHashMap(u64, *RuntimeUdpAssociation),
     retired: *std.ArrayList(*RuntimeUdpAssociation),
+    udp_timeout_seconds: u64,
+) void {
+    const now = nowNs(io);
+    var removals = std.ArrayList(RuntimeRemoval).empty;
+    defer removals.deinit(allocator);
+
+    var it = associations.iterator();
+    while (it.next()) |entry| {
+        const assoc = entry.value_ptr.*;
+        const expired = now - assoc.last_seen_ns.load(.acquire) >= timeoutNs(udp_timeout_seconds);
+        const closed = assoc.closed.load(.acquire);
+        if (!expired and !closed) continue;
+        if (expired) assoc.closed.store(true, .release);
+        removals.append(allocator, .{ .key = entry.key_ptr.* }) catch return;
+    }
+
+    for (removals.items) |removal| {
+        if (associations.fetchRemove(removal.key)) |removed| {
+            retired.append(allocator, removed.value) catch {};
+        }
+    }
+
+    var i: usize = 0;
+    while (i < retired.items.len) {
+        const assoc = retired.items[i];
+        if (!assoc.closed.load(.acquire)) {
+            i += 1;
+            continue;
+        }
+        assoc.deinit();
+        allocator.destroy(assoc);
+        _ = retired.swapRemove(i);
+    }
+}
+
+fn cleanupDirectRuntimeUdpAssociations(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    associations: *std.AutoHashMap(u64, *DirectRuntimeUdpAssociation),
+    retired: *std.ArrayList(*DirectRuntimeUdpAssociation),
     udp_timeout_seconds: u64,
 ) void {
     const now = nowNs(io);
@@ -1273,6 +1415,46 @@ test "tun UDP fake DNS target is checked against outbound ACL by domain" {
         .payload = "query",
     });
     try std.testing.expect(outboundBlocked(&access_control, io.io(), target.address));
+}
+
+test "tun UDP fake DNS target can be bypassed by ACL domain rule" {
+    var io = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer io.deinit();
+    const client = try net.IpAddress.parse("192.0.2.10", 53000);
+    const fake_target = try net.IpAddress.parse("10.255.0.1", 443);
+
+    var manager = try fake_dns.Manager.init(std.testing.allocator, io.io(), "10.255.0.0/30", null, null, 10);
+    defer manager.deinit();
+    _ = try manager.mapDomainIpv4(io.io(), "direct.example");
+
+    var access_control = try acl.AccessControl.parseSlice(std.testing.allocator,
+        \\[proxy_all]
+        \\[bypass_list]
+        \\||direct.example
+        \\
+    );
+    defer access_control.deinit();
+
+    const target = try tunUdpTarget(io.io(), &manager, .{
+        .version = .ipv4,
+        .source = client,
+        .destination = fake_target,
+        .payload = "query",
+    });
+    try std.testing.expect(targetBypassed(&access_control, io.io(), target.address));
+}
+
+test "tun direct UDP response preserves fake source override" {
+    var out: [1500]u8 = undefined;
+    const client = try net.IpAddress.parse("192.0.2.10", 53000);
+    const real_target = try net.IpAddress.parse("198.51.100.20", 443);
+    const fake_target = try net.IpAddress.parse("10.255.0.1", 443);
+
+    const packet = try buildDirectUdpResponsePacket(&out, client, real_target, fake_target, "answer");
+    const udp_packet = (try parseUdpPacket(packet)).?;
+    try std.testing.expectEqual(fake_target, udp_packet.source);
+    try std.testing.expectEqual(client, udp_packet.destination);
+    try std.testing.expectEqualStrings("answer", udp_packet.payload);
 }
 
 test "tun linux ifreq copies optional interface name" {

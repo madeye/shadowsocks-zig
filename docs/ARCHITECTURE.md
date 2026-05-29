@@ -164,11 +164,13 @@ descriptor through the same libuv readiness bridge as TCP/UDP sockets. The
 runtime loop handles UDP by selecting a UDP-capable server, maintaining
 per-client-and-destination tun UDP associations, applying fake-DNS rewrites and
 outbound ACL blocking, forwarding encrypted datagrams to the server, and
-writing decrypted responses back to the tun device. When a fake-DNS address is
-rewritten to a domain before encryption, response packets preserve the fake IP
-as their source address for the local application. The TCP state machine, direct
-ACL-bypass forwarding, and native macOS/iOS/Windows device wiring are still
-separate remaining work.
+writing decrypted responses back to the tun device. ACL-bypassed UDP targets
+are sent directly through a separate UDP socket association and direct responses
+are synthesized back into TUN IP packets. When a fake-DNS address is rewritten
+to a domain before encryption or direct forwarding, response packets preserve
+the fake IP as their source address for the local application. The TCP state
+machine and native macOS/iOS/Windows device wiring are still separate remaining
+work.
 
 The first supported cipher set is the SIP004 AEAD group:
 `aes-128-gcm`, `aes-256-gcm`, `chacha20-ietf-poly1305`, and
