@@ -50,9 +50,10 @@ Current state:
 - Tun local config compatibility via `protocol = "tun"` with
   `tun_interface_name`, `tun_interface_address`,
   `tun_interface_destination`, and `tun_device_fd_from_path`. The relay layer
-  now has an explicit tun dispatch path, but the virtual TCP/IP packet stack is
-  still remaining work and runtime tun startup returns a specific
-  not-yet-implemented error.
+  now has an explicit tun dispatch path plus IPv4/IPv6 UDP packet
+  parse/synthesis helpers, but the runtime tun device loop and virtual TCP
+  state machine are still remaining work and runtime tun startup returns a
+  specific not-yet-implemented error.
 - TCP `ss-server` path for supported ciphers.
 - UDP `ss-local` SOCKS5 UDP ASSOCIATE path for supported ciphers.
 - UDP `ss-server` path for supported ciphers.

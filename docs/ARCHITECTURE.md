@@ -150,8 +150,12 @@ Tun local configuration follows shadowsocks-rust's `protocol = "tun"` local
 shape. Zig config parsing accepts `tun_interface_name`,
 `tun_interface_address`, `tun_interface_destination`, and the Unix
 `tun_device_fd_from_path` handoff path, and local mode dispatches tun locals to
-a dedicated relay module. The virtual TCP/IP packet stack is not implemented
-yet, so runtime tun startup fails explicitly instead of falling through to a
+a dedicated relay module. The module now owns IPv4/IPv6 packet classification,
+UDP packet extraction, and UDP response packet synthesis with IP/UDP checksums,
+matching the packet-layer role of shadowsocks-rust's tun service before it
+hands packets to UDP associations or the virtual TCP stack. The complete
+runtime tun device loop and TCP state machine are not implemented yet, so
+runtime tun startup fails explicitly instead of falling through to a
 listener-based local protocol.
 
 The first supported cipher set is the SIP004 AEAD group:
