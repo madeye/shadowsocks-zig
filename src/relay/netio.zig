@@ -624,7 +624,7 @@ fn recvUdpRedir(fd: std.posix.socket_t, out: []u8) anyerror!UdpRedirPacket {
 
     var source: PosixAddress = undefined;
     var iov = std.posix.iovec{ .base = out.ptr, .len = out.len };
-    var control_buf: [128]u8 align(@alignOf(std.posix.cmsghdr)) = undefined;
+    var control_buf: [128]u8 align(@alignOf(std.os.linux.cmsghdr)) = undefined;
     var msg = std.posix.msghdr{
         .name = &source.any,
         .namelen = @sizeOf(PosixAddress),
@@ -682,24 +682,24 @@ fn originalDestinationFromControl(msg: *const std.posix.msghdr) !net.IpAddress {
     return error.RedirectionOriginalDestinationMissing;
 }
 
-fn firstControlMessage(msg: *const std.posix.msghdr) ?*std.posix.cmsghdr {
+fn firstControlMessage(msg: *const std.posix.msghdr) ?*std.os.linux.cmsghdr {
     const control = msg.control orelse return null;
-    if (msg.controllen < @sizeOf(std.posix.cmsghdr)) return null;
+    if (msg.controllen < @sizeOf(std.os.linux.cmsghdr)) return null;
     return @ptrCast(@alignCast(control));
 }
 
-fn nextControlMessage(msg: *const std.posix.msghdr, cmsg: *std.posix.cmsghdr) ?*std.posix.cmsghdr {
+fn nextControlMessage(msg: *const std.posix.msghdr, cmsg: *std.os.linux.cmsghdr) ?*std.os.linux.cmsghdr {
     const base_raw: [*]u8 = @ptrCast(msg.control orelse return null);
     const current_raw: [*]u8 = @ptrCast(cmsg);
     const current_offset = @intFromPtr(current_raw) - @intFromPtr(base_raw);
     const next_offset = current_offset + controlMessageAlign(cmsg.len);
-    if (next_offset + @sizeOf(std.posix.cmsghdr) > msg.controllen) return null;
+    if (next_offset + @sizeOf(std.os.linux.cmsghdr) > msg.controllen) return null;
     return @ptrCast(@alignCast(base_raw + next_offset));
 }
 
-fn controlMessageData(cmsg: *const std.posix.cmsghdr) []const u8 {
+fn controlMessageData(cmsg: *const std.os.linux.cmsghdr) []const u8 {
     const raw: [*]const u8 = @ptrCast(cmsg);
-    const offset = controlMessageAlign(@sizeOf(std.posix.cmsghdr));
+    const offset = controlMessageAlign(@sizeOf(std.os.linux.cmsghdr));
     const len = if (cmsg.len > offset) cmsg.len - offset else 0;
     return raw[offset..][0..len];
 }
