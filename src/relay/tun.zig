@@ -119,6 +119,7 @@ pub const UdpAssociation = struct {
     client_session_id: u64,
     client_packet_id: u64 = 0,
     server_replay: replay.ReplayProtector,
+    response_source_override: ?net.IpAddress = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -146,6 +147,11 @@ pub const UdpAssociation = struct {
 
     pub fn encryptPacket(self: *UdpAssociation, packet: UdpPacket) ![]u8 {
         const target_address = try netio.ipToShadow(packet.destination);
+        return try self.encryptPacketToAddress(packet, target_address, null);
+    }
+
+    pub fn encryptPacketToAddress(self: *UdpAssociation, packet: UdpPacket, target_address: ss_address.Address, response_source_override: ?net.IpAddress) ![]u8 {
+        self.response_source_override = response_source_override;
         const plain = try makeShadowPayload(self.allocator, target_address, packet.payload);
         defer self.allocator.free(plain);
         return try self.encryptPlain(plain);
@@ -162,7 +168,7 @@ pub const UdpAssociation = struct {
 
         const parsed = try ss_address.Address.read(decrypted.plain);
         const payload = decrypted.plain[parsed.used..];
-        const source = try netio.shadowToIp(parsed.address);
+        const source = self.response_source_override orelse try netio.shadowToIp(parsed.address);
         return try buildUdpPacket(out, source, self.client_addr, payload);
     }
 
@@ -260,8 +266,6 @@ pub fn runLocal(
 ) !void {
     _ = tcp_servers;
     _ = tcp_next;
-    _ = access_control;
-    _ = fake_dns_manager;
 
     return switch (builtin.os.tag) {
         .linux => {
@@ -270,13 +274,13 @@ pub fn runLocal(
             else
                 try Device.open(local_cfg);
             defer device.close();
-            return try runDeviceLoop(allocator, io, &device, udp_servers, udp_next, local_cfg, udp_timeout_seconds, udp_max_associations);
+            return try runDeviceLoop(allocator, io, &device, udp_servers, udp_next, local_cfg, udp_timeout_seconds, udp_max_associations, access_control, fake_dns_manager);
         },
         .macos, .ios, .freebsd, .openbsd => {
             if (local_cfg.tun_device_fd_from_path) |path| {
                 var device = try Device.fromFdPath(io, path);
                 defer device.close();
-                return try runDeviceLoop(allocator, io, &device, udp_servers, udp_next, local_cfg, udp_timeout_seconds, udp_max_associations);
+                return try runDeviceLoop(allocator, io, &device, udp_servers, udp_next, local_cfg, udp_timeout_seconds, udp_max_associations, access_control, fake_dns_manager);
             }
             return error.TunLocalDeviceNotImplemented;
         },
@@ -294,6 +298,8 @@ fn runDeviceLoop(
     local_cfg: config.Local,
     udp_timeout_seconds: u64,
     udp_max_associations: ?usize,
+    access_control: ?*const acl.AccessControl,
+    fake_dns_manager: ?*fake_dns.Manager,
 ) !void {
     var udp_associations = std.AutoHashMap(u64, *RuntimeUdpAssociation).init(allocator);
     defer {
@@ -315,7 +321,7 @@ fn runDeviceLoop(
             .udp => {
                 if (!local_cfg.mode.enableUdp()) continue;
                 const udp_packet = (try parseUdpPacket(packet[0..n])) orelse continue;
-                try handleTunUdpPacket(allocator, io, device, udp_servers, udp_next, udp_timeout_seconds, udp_max_associations, &udp_associations, udp_packet);
+                try handleTunUdpPacket(allocator, io, device, udp_servers, udp_next, udp_timeout_seconds, udp_max_associations, access_control, fake_dns_manager, &udp_associations, udp_packet);
             },
             .tcp, .icmp, .icmpv6 => {
                 if (local_cfg.mode.enableTcp()) {
@@ -335,10 +341,15 @@ fn handleTunUdpPacket(
     udp_next: *std.atomic.Value(usize),
     udp_timeout_seconds: u64,
     udp_max_associations: ?usize,
+    access_control: ?*const acl.AccessControl,
+    fake_dns_manager: ?*fake_dns.Manager,
     associations: *std.AutoHashMap(u64, *RuntimeUdpAssociation),
     packet: UdpPacket,
 ) !void {
-    const key = netio.addressHash(packet.source);
+    const target = try tunUdpTarget(io, fake_dns_manager, packet);
+    if (outboundBlocked(access_control, io, target.address)) return;
+
+    const key = addressPairHash(packet.source, packet.destination);
     const assoc = associations.get(key) orelse blk: {
         if (udp_max_associations) |capacity| {
             if (associations.count() >= capacity) return;
@@ -367,7 +378,7 @@ fn handleTunUdpPacket(
     };
     assoc.last_seen_ns.store(nowNs(io), .release);
 
-    const encrypted = try assoc.udp.encryptPacket(packet);
+    const encrypted = try assoc.udp.encryptPacketToAddress(packet, target.address, target.response_source_override);
     defer allocator.free(encrypted);
     _ = try assoc.remote_socket.sendTo(encrypted, assoc.server_addr);
 }
@@ -404,6 +415,33 @@ fn selectUdpServer(server_cfgs: []const config.Server, next_index: *std.atomic.V
 const RuntimeRemoval = struct {
     key: u64,
 };
+
+const TunUdpTarget = struct {
+    address: ss_address.Address,
+    response_source_override: ?net.IpAddress = null,
+};
+
+fn tunUdpTarget(io: std.Io, manager: ?*fake_dns.Manager, packet: UdpPacket) !TunUdpTarget {
+    const original = try netio.ipToShadow(packet.destination);
+    const active_manager = manager orelse return .{ .address = original };
+    const rewritten = active_manager.rewriteAddress(io, original) orelse return .{ .address = original };
+    return .{
+        .address = rewritten,
+        .response_source_override = packet.destination,
+    };
+}
+
+fn outboundBlocked(access_control: ?*const acl.AccessControl, io: std.Io, address: ss_address.Address) bool {
+    const active_acl = access_control orelse return false;
+    return active_acl.outboundBlocked(io, address);
+}
+
+fn addressPairHash(a: net.IpAddress, b: net.IpAddress) u64 {
+    var hasher = std.hash.Wyhash.init(0);
+    hasher.update(&std.mem.toBytes(netio.addressHash(a)));
+    hasher.update(&std.mem.toBytes(netio.addressHash(b)));
+    return hasher.final();
+}
 
 fn cleanupRuntimeUdpAssociations(
     allocator: std.mem.Allocator,
@@ -1150,6 +1188,91 @@ test "tun UDP association synthesizes inbound response packet" {
     try std.testing.expectEqual(target, udp_packet.source);
     try std.testing.expectEqual(client, udp_packet.destination);
     try std.testing.expectEqualStrings("answer", udp_packet.payload);
+}
+
+test "tun UDP fake DNS target uses domain while preserving fake response source" {
+    var io = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer io.deinit();
+    const server_cfg = testServerConfig();
+    const client = try net.IpAddress.parse("192.0.2.10", 53000);
+    const fake_target = try net.IpAddress.parse("10.255.0.1", 53);
+    const real_target = try net.IpAddress.parse("198.51.100.20", 53);
+
+    var manager = try fake_dns.Manager.init(std.testing.allocator, io.io(), "10.255.0.0/30", null, null, 10);
+    defer manager.deinit();
+    const mapped = try manager.mapDomainIpv4(io.io(), "Example.COM");
+    try std.testing.expectEqualSlices(u8, &fake_target.ip4.bytes, &mapped);
+
+    var assoc = try UdpAssociation.init(std.testing.allocator, io.io(), server_cfg, client);
+    defer assoc.deinit();
+
+    const packet = UdpPacket{
+        .version = .ipv4,
+        .source = client,
+        .destination = fake_target,
+        .payload = "query",
+    };
+    const target = try tunUdpTarget(io.io(), &manager, packet);
+    try std.testing.expectEqual(fake_target, target.response_source_override.?);
+
+    const encrypted = try assoc.encryptPacketToAddress(packet, target.address, target.response_source_override);
+    defer std.testing.allocator.free(encrypted);
+
+    var master_key: [32]u8 = undefined;
+    try crypto.deriveMasterKey(server_cfg.method, server_cfg.password, master_key[0..server_cfg.method.keyLen()]);
+    const plain = try crypto.decryptUdpPacket(std.testing.allocator, server_cfg.method, master_key[0..server_cfg.method.keyLen()], encrypted);
+    defer std.testing.allocator.free(plain);
+
+    const parsed = try ss_address.Address.read(plain);
+    try std.testing.expectEqualStrings("example.com", parsed.address.domain.name);
+    try std.testing.expectEqual(@as(u16, 53), parsed.address.domain.port);
+    try std.testing.expectEqualStrings("query", plain[parsed.used..]);
+
+    const plain_response = try makeShadowPayload(std.testing.allocator, try netio.ipToShadow(real_target), "answer");
+    defer std.testing.allocator.free(plain_response);
+    const encrypted_response = try crypto.encryptUdpPacket(std.testing.allocator, io.io(), server_cfg.method, master_key[0..server_cfg.method.keyLen()], plain_response);
+    defer std.testing.allocator.free(encrypted_response);
+
+    var out: [1500]u8 = undefined;
+    const response_packet = try assoc.decryptPacket(encrypted_response, &out);
+    const udp_packet = (try parseUdpPacket(response_packet)).?;
+    try std.testing.expectEqual(fake_target, udp_packet.source);
+    try std.testing.expectEqual(client, udp_packet.destination);
+    try std.testing.expectEqualStrings("answer", udp_packet.payload);
+}
+
+test "tun UDP association key separates destinations for same client socket" {
+    const client = try net.IpAddress.parse("192.0.2.10", 53000);
+    const target_a = try net.IpAddress.parse("198.51.100.20", 53);
+    const target_b = try net.IpAddress.parse("198.51.100.21", 53);
+
+    try std.testing.expect(addressPairHash(client, target_a) != addressPairHash(client, target_b));
+}
+
+test "tun UDP fake DNS target is checked against outbound ACL by domain" {
+    var io = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer io.deinit();
+    const client = try net.IpAddress.parse("192.0.2.10", 53000);
+    const fake_target = try net.IpAddress.parse("10.255.0.1", 443);
+
+    var manager = try fake_dns.Manager.init(std.testing.allocator, io.io(), "10.255.0.0/30", null, null, 10);
+    defer manager.deinit();
+    _ = try manager.mapDomainIpv4(io.io(), "blocked.example");
+
+    var access_control = try acl.AccessControl.parseSlice(std.testing.allocator,
+        \\[outbound_block_list]
+        \\||blocked.example
+        \\
+    );
+    defer access_control.deinit();
+
+    const target = try tunUdpTarget(io.io(), &manager, .{
+        .version = .ipv4,
+        .source = client,
+        .destination = fake_target,
+        .payload = "query",
+    });
+    try std.testing.expect(outboundBlocked(&access_control, io.io(), target.address));
 }
 
 test "tun linux ifreq copies optional interface name" {

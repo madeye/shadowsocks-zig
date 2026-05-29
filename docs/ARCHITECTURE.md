@@ -162,9 +162,12 @@ the tun device. On Linux, the tun module can also open `/dev/net/tun`, applies
 `TUNSETIFF` with `IFF_TUN` and `IFF_NO_PI`, and waits on the tun file
 descriptor through the same libuv readiness bridge as TCP/UDP sockets. The
 runtime loop handles UDP by selecting a UDP-capable server, maintaining
-per-client tun UDP associations, forwarding encrypted datagrams to the server,
-and writing decrypted responses back to the tun device. The TCP state machine
-is not implemented yet, and native macOS/iOS/Windows device wiring is still
+per-client-and-destination tun UDP associations, applying fake-DNS rewrites and
+outbound ACL blocking, forwarding encrypted datagrams to the server, and
+writing decrypted responses back to the tun device. When a fake-DNS address is
+rewritten to a domain before encryption, response packets preserve the fake IP
+as their source address for the local application. The TCP state machine, direct
+ACL-bypass forwarding, and native macOS/iOS/Windows device wiring are still
 separate remaining work.
 
 The first supported cipher set is the SIP004 AEAD group:

@@ -57,7 +57,9 @@ Current state:
   descriptor with `SCM_RIGHTS`, matching shadowsocks-rust's handoff option.
   Linux tun UDP packets are read from the device, encrypted to the selected
   Shadowsocks server, and server replies are written back as synthesized IP
-  packets. The virtual TCP state machine is still remaining work.
+  packets. TUN UDP target handling now applies fake-DNS rewrites and outbound
+  ACL blocking before encryption. The virtual TCP state machine and direct
+  ACL-bypass forwarding are still remaining work.
 - TCP `ss-server` path for supported ciphers.
 - UDP `ss-local` SOCKS5 UDP ASSOCIATE path for supported ciphers.
 - UDP `ss-server` path for supported ciphers.
