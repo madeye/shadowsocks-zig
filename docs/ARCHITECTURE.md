@@ -140,8 +140,11 @@ The current runtime implements IPv4/IPv6 pools for A and AAAA queries and
 shares those mappings with other local listeners in the process, so SOCKS/HTTP
 requests to fake IP addresses are rewritten back to the original domain before
 ACL checks and Shadowsocks tunnel setup. When `fake_dns_database_path` is set,
-records are persisted in a small JSON cache and reloaded on restart.
-RocksDB-compatible storage remains future work.
+default builds persist records in a small JSON cache and reload them on
+restart. Builds made with `-Drocksdb=true` use RocksDB and BSON records with
+the same key names as shadowsocks-rust, including
+`shadowsocks_fakedns_meta`, `shadowsocks_fakedns_name2ip_*`, and
+`shadowsocks_fakedns_ip2name_*`.
 
 The first supported cipher set is the SIP004 AEAD group:
 `aes-128-gcm`, `aes-256-gcm`, `chacha20-ietf-poly1305`, and

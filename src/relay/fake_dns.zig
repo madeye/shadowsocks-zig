@@ -1,8 +1,13 @@
 const std = @import("std");
+const build_options = @import("build_options");
 const ss_address = @import("../protocol/address.zig");
 const dns = @import("../protocol/dns.zig");
+const rocksdb = if (build_options.rocksdb) @cImport({
+    @cInclude("rocksdb/c.h");
+}) else struct {};
 
 pub const FakeDnsError = anyerror;
+const fake_dns_storage_version = 3;
 
 const Mapping = struct {
     ipv4: ?u32 = null,
@@ -15,6 +20,12 @@ const ParsedAddress = struct {
     ip4: u32 = 0,
     ip6: u128 = 0,
     port: u16,
+};
+
+const StorageMode = enum {
+    none,
+    json,
+    rocksdb,
 };
 
 const SpinLock = struct {
@@ -105,6 +116,112 @@ const Ipv6Pool = struct {
     }
 };
 
+const RocksDbStore = struct {
+    db: ?*anyopaque = null,
+    read_options: ?*anyopaque = null,
+    write_options: ?*anyopaque = null,
+
+    fn open(self: *RocksDbStore, path: []const u8) FakeDnsError!void {
+        if (!build_options.rocksdb) return error.RocksDbNotEnabled;
+        const path_z = try std.heap.smp_allocator.dupeZ(u8, path);
+        defer std.heap.smp_allocator.free(path_z);
+
+        var err: ?[*:0]u8 = null;
+        const opts = rocksdb.rocksdb_options_create();
+        defer rocksdb.rocksdb_options_destroy(opts);
+        rocksdb.rocksdb_options_set_create_if_missing(opts, 1);
+        self.db = rocksdb.rocksdb_open(opts, path_z.ptr, &err);
+        try checkRocksDbError(err);
+        self.read_options = rocksdb.rocksdb_readoptions_create();
+        self.write_options = rocksdb.rocksdb_writeoptions_create();
+    }
+
+    fn destroy(path: []const u8) FakeDnsError!void {
+        if (!build_options.rocksdb) return error.RocksDbNotEnabled;
+        const path_z = try std.heap.smp_allocator.dupeZ(u8, path);
+        defer std.heap.smp_allocator.free(path_z);
+
+        var err: ?[*:0]u8 = null;
+        const opts = rocksdb.rocksdb_options_create();
+        defer rocksdb.rocksdb_options_destroy(opts);
+        rocksdb.rocksdb_destroy_db(opts, path_z.ptr, &err);
+        try checkRocksDbError(err);
+    }
+
+    fn deinit(self: *RocksDbStore) void {
+        if (!build_options.rocksdb) return;
+        if (self.read_options) |opts| rocksdb.rocksdb_readoptions_destroy(@ptrCast(opts));
+        if (self.write_options) |opts| rocksdb.rocksdb_writeoptions_destroy(@ptrCast(opts));
+        if (self.db) |db| rocksdb.rocksdb_close(@ptrCast(db));
+        self.* = .{};
+    }
+
+    fn get(self: *RocksDbStore, allocator: std.mem.Allocator, key: []const u8) FakeDnsError!?[]u8 {
+        if (!build_options.rocksdb) return error.RocksDbNotEnabled;
+        var err: ?[*:0]u8 = null;
+        var len: usize = 0;
+        const value = rocksdb.rocksdb_get(@ptrCast(self.db.?), @ptrCast(self.read_options.?), key.ptr, key.len, &len, &err);
+        try checkRocksDbError(err);
+        if (value == null) return null;
+        defer rocksdb.rocksdb_free(value);
+        const out = try allocator.alloc(u8, len);
+        @memcpy(out, value[0..len]);
+        return out;
+    }
+
+    fn put(self: *RocksDbStore, key: []const u8, value: []const u8) FakeDnsError!void {
+        if (!build_options.rocksdb) return error.RocksDbNotEnabled;
+        var err: ?[*:0]u8 = null;
+        rocksdb.rocksdb_put(@ptrCast(self.db.?), @ptrCast(self.write_options.?), key.ptr, key.len, value.ptr, value.len, &err);
+        try checkRocksDbError(err);
+    }
+
+    fn iterator(self: *RocksDbStore) RocksDbIterator {
+        return .{ .iter = rocksdb.rocksdb_create_iterator(@ptrCast(self.db.?), @ptrCast(self.read_options.?)) };
+    }
+};
+
+const RocksDbIterator = struct {
+    iter: ?*anyopaque,
+
+    fn deinit(self: *RocksDbIterator) void {
+        if (build_options.rocksdb and self.iter != null) rocksdb.rocksdb_iter_destroy(@ptrCast(self.iter.?));
+        self.* = .{ .iter = null };
+    }
+
+    fn seekToFirst(self: *RocksDbIterator) void {
+        rocksdb.rocksdb_iter_seek_to_first(@ptrCast(self.iter.?));
+    }
+
+    fn valid(self: *RocksDbIterator) bool {
+        return rocksdb.rocksdb_iter_valid(@ptrCast(self.iter.?)) != 0;
+    }
+
+    fn next(self: *RocksDbIterator) void {
+        rocksdb.rocksdb_iter_next(@ptrCast(self.iter.?));
+    }
+
+    fn key(self: *RocksDbIterator) []const u8 {
+        var len: usize = 0;
+        const ptr = rocksdb.rocksdb_iter_key(@ptrCast(self.iter.?), &len);
+        return ptr[0..len];
+    }
+
+    fn value(self: *RocksDbIterator) []const u8 {
+        var len: usize = 0;
+        const ptr = rocksdb.rocksdb_iter_value(@ptrCast(self.iter.?), &len);
+        return ptr[0..len];
+    }
+};
+
+fn checkRocksDbError(err: ?[*:0]u8) FakeDnsError!void {
+    if (!build_options.rocksdb) return;
+    if (err) |message| {
+        defer rocksdb.rocksdb_free(message);
+        return error.RocksDbError;
+    }
+}
+
 pub const Manager = struct {
     allocator: std.mem.Allocator,
     mutex: SpinLock = .{},
@@ -112,6 +229,8 @@ pub const Manager = struct {
     ipv6_pool: Ipv6Pool,
     expire_ns: i64,
     database_path: ?[]const u8,
+    storage_mode: StorageMode,
+    rocksdb_store: RocksDbStore = .{},
     domain_to_mapping: std.StringHashMap(Mapping),
     ip_to_domain: std.AutoHashMap(u32, []const u8),
     ip6_to_domain: std.AutoHashMap(u128, []const u8),
@@ -130,11 +249,13 @@ pub const Manager = struct {
             .ipv6_pool = try Ipv6Pool.parse(ipv6_network orelse "fc00::/7"),
             .expire_ns = timeoutNs(expire_seconds),
             .database_path = if (database_path) |path| try allocator.dupe(u8, path) else null,
+            .storage_mode = chooseStorageMode(database_path),
             .domain_to_mapping = std.StringHashMap(Mapping).init(allocator),
             .ip_to_domain = std.AutoHashMap(u32, []const u8).init(allocator),
             .ip6_to_domain = std.AutoHashMap(u128, []const u8).init(allocator),
         };
         errdefer self.deinit();
+        try self.openStorage(ipv4_network orelse "172.16.0.0/12", ipv6_network orelse "fc00::/7");
         try self.load(io);
         return self;
     }
@@ -142,11 +263,41 @@ pub const Manager = struct {
     pub fn deinit(self: *Manager) void {
         var it = self.domain_to_mapping.iterator();
         while (it.next()) |entry| self.allocator.free(entry.key_ptr.*);
+        self.rocksdb_store.deinit();
         if (self.database_path) |path| self.allocator.free(path);
         self.domain_to_mapping.deinit();
         self.ip_to_domain.deinit();
         self.ip6_to_domain.deinit();
         self.* = undefined;
+    }
+
+    fn openStorage(self: *Manager, ipv4_network: []const u8, ipv6_network: []const u8) FakeDnsError!void {
+        if (!build_options.rocksdb) return;
+        if (self.storage_mode != .rocksdb) return;
+        const path = self.database_path orelse return;
+        try self.rocksdb_store.open(path);
+
+        const meta_key = "shadowsocks_fakedns_meta";
+        const meta = try self.rocksdb_store.get(self.allocator, meta_key);
+        defer if (meta) |bytes| self.allocator.free(bytes);
+        var recreate = true;
+        if (meta) |bytes| {
+            if (decodeStorageMeta(self.allocator, bytes)) |stored| {
+                defer stored.deinit(self.allocator);
+                recreate = stored.version != fake_dns_storage_version or
+                    !std.mem.eql(u8, stored.ipv4_network, ipv4_network) or
+                    !std.mem.eql(u8, stored.ipv6_network, ipv6_network);
+            } else |_| {}
+        }
+
+        if (!recreate) return;
+
+        self.rocksdb_store.deinit();
+        try RocksDbStore.destroy(path);
+        try self.rocksdb_store.open(path);
+        const encoded = try encodeStorageMeta(self.allocator, ipv4_network, ipv6_network);
+        defer self.allocator.free(encoded);
+        try self.rocksdb_store.put(meta_key, encoded);
     }
 
     pub fn mapDomainIpv4(self: *Manager, io: std.Io, domain: []const u8) FakeDnsError![4]u8 {
@@ -269,6 +420,11 @@ pub const Manager = struct {
     }
 
     fn load(self: *Manager, io: std.Io) FakeDnsError!void {
+        if (build_options.rocksdb and self.storage_mode == .rocksdb) return try self.loadRocksDb(io);
+        if (self.storage_mode == .json) return try self.loadJson(io);
+    }
+
+    fn loadJson(self: *Manager, io: std.Io) FakeDnsError!void {
         const path = self.database_path orelse return;
         const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, self.allocator, .limited(1024 * 1024)) catch |err| switch (err) {
             error.FileNotFound => return,
@@ -316,6 +472,11 @@ pub const Manager = struct {
     }
 
     fn save(self: *Manager, io: std.Io) FakeDnsError!void {
+        if (build_options.rocksdb and self.storage_mode == .rocksdb) return try self.saveRocksDb(io);
+        if (self.storage_mode == .json) return try self.saveJson(io);
+    }
+
+    fn saveJson(self: *Manager, io: std.Io) FakeDnsError!void {
         const path = self.database_path orelse return;
         if (std.fs.path.dirname(path)) |dir| {
             if (dir.len != 0) try std.Io.Dir.cwd().createDirPath(io, dir);
@@ -323,6 +484,86 @@ pub const Manager = struct {
         const bytes = try self.render(io);
         defer self.allocator.free(bytes);
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes });
+    }
+
+    fn loadRocksDb(self: *Manager, io: std.Io) FakeDnsError!void {
+        var it = self.rocksdb_store.iterator();
+        defer it.deinit();
+        it.seekToFirst();
+        const prefix = "shadowsocks_fakedns_name2ip_";
+        const now_unix = nowUnixSeconds(io);
+        const now_ns = nowNs(io);
+        while (it.valid()) : (it.next()) {
+            const key = it.key();
+            if (!std.mem.startsWith(u8, key, prefix)) continue;
+            const domain_raw = key[prefix.len..];
+            const decoded = decodeDomainNameMapping(self.allocator, it.value()) catch continue;
+            defer decoded.deinit(self.allocator);
+            if (decoded.expire_unix <= now_unix) continue;
+            const domain = try lowerAlloc(self.allocator, domain_raw);
+            errdefer self.allocator.free(domain);
+            var mapping = Mapping{ .expire_ns = now_ns + timeoutNs(@intCast(decoded.expire_unix - @as(i64, @intCast(now_unix)))) };
+            if (decoded.ipv4_addr.len != 0) {
+                if (std.Io.net.IpAddress.parse(decoded.ipv4_addr, 0)) |address| {
+                    if (address == .ip4) mapping.ipv4 = bytesToU32(address.ip4.bytes);
+                } else |_| {}
+            }
+            if (decoded.ipv6_addr.len != 0) {
+                if (std.Io.net.IpAddress.parse(decoded.ipv6_addr, 0)) |address| {
+                    if (address == .ip6) mapping.ipv6 = bytesToU128(address.ip6.bytes);
+                } else |_| {}
+            }
+            if (mapping.ipv4 == null and mapping.ipv6 == null) continue;
+            const entry = try self.domain_to_mapping.getOrPut(domain);
+            if (entry.found_existing) {
+                self.allocator.free(domain);
+                entry.value_ptr.* = mapping;
+            } else {
+                entry.value_ptr.* = mapping;
+            }
+            const stored_key = entry.key_ptr.*;
+            if (mapping.ipv4) |ip| try self.ip_to_domain.put(ip, stored_key);
+            if (mapping.ipv6) |ip| try self.ip6_to_domain.put(ip, stored_key);
+        }
+    }
+
+    fn saveRocksDb(self: *Manager, io: std.Io) FakeDnsError!void {
+        const now_unix = nowUnixSeconds(io);
+        const now_ns = nowNs(io);
+        var it = self.domain_to_mapping.iterator();
+        while (it.next()) |entry| {
+            const mapping = entry.value_ptr.*;
+            if (mapping.expire_ns < now_ns) continue;
+            const ttl_ns: u64 = @intCast(mapping.expire_ns - now_ns);
+            const expire_unix: i64 = @intCast(now_unix + ttl_ns / std.time.ns_per_s);
+            const name_key = try std.fmt.allocPrint(self.allocator, "shadowsocks_fakedns_name2ip_{s}", .{entry.key_ptr.*});
+            defer self.allocator.free(name_key);
+            const ipv4_text = if (mapping.ipv4) |ip| try ipv4String(self.allocator, ip) else try self.allocator.dupe(u8, "");
+            defer self.allocator.free(ipv4_text);
+            const ipv6_text = if (mapping.ipv6) |ip| try ipv6String(self.allocator, ip) else try self.allocator.dupe(u8, "");
+            defer self.allocator.free(ipv6_text);
+            const domain_value = try encodeDomainNameMapping(self.allocator, ipv4_text, ipv6_text, expire_unix);
+            defer self.allocator.free(domain_value);
+            try self.rocksdb_store.put(name_key, domain_value);
+            if (mapping.ipv4) |ip| {
+                const ip_text = try ipv4String(self.allocator, ip);
+                defer self.allocator.free(ip_text);
+                try self.putRocksDbIpMapping(ip_text, entry.key_ptr.*, expire_unix);
+            }
+            if (mapping.ipv6) |ip| {
+                const ip_text = try ipv6String(self.allocator, ip);
+                defer self.allocator.free(ip_text);
+                try self.putRocksDbIpMapping(ip_text, entry.key_ptr.*, expire_unix);
+            }
+        }
+    }
+
+    fn putRocksDbIpMapping(self: *Manager, ip_text: []const u8, domain: []const u8, expire_unix: i64) FakeDnsError!void {
+        const key = try std.fmt.allocPrint(self.allocator, "shadowsocks_fakedns_ip2name_{s}", .{ip_text});
+        defer self.allocator.free(key);
+        const value = try encodeIpAddrMapping(self.allocator, domain, expire_unix);
+        defer self.allocator.free(value);
+        try self.rocksdb_store.put(key, value);
     }
 
     fn render(self: *Manager, io: std.Io) FakeDnsError![]u8 {
@@ -363,6 +604,34 @@ pub const Manager = struct {
     }
 };
 
+const StorageMeta = struct {
+    ipv4_network: []u8,
+    ipv6_network: []u8,
+    version: u32,
+
+    fn deinit(self: StorageMeta, allocator: std.mem.Allocator) void {
+        allocator.free(self.ipv4_network);
+        allocator.free(self.ipv6_network);
+    }
+};
+
+const DomainNameMapping = struct {
+    ipv4_addr: []u8,
+    ipv6_addr: []u8,
+    expire_unix: i64,
+
+    fn deinit(self: DomainNameMapping, allocator: std.mem.Allocator) void {
+        allocator.free(self.ipv4_addr);
+        allocator.free(self.ipv6_addr);
+    }
+};
+
+fn chooseStorageMode(database_path: ?[]const u8) StorageMode {
+    const path = database_path orelse return .none;
+    if (std.mem.endsWith(u8, path, ".json")) return .json;
+    return if (build_options.rocksdb) .rocksdb else .json;
+}
+
 pub fn writeResponse(io: std.Io, manager: *Manager, packet: []const u8, out: []u8) !usize {
     var host_buf: [255]u8 = undefined;
     const question = try dns.queryQuestion(packet, &host_buf);
@@ -398,6 +667,183 @@ fn jsonU64(value: ?std.json.Value) ?u64 {
         .float => |f| if (f >= 0) @intFromFloat(f) else null,
         else => null,
     };
+}
+
+fn encodeStorageMeta(allocator: std.mem.Allocator, ipv4_network: []const u8, ipv6_network: []const u8) ![]u8 {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(allocator);
+    try out.appendNTimes(allocator, 0, 4);
+    try appendBsonStringElement(&out, allocator, "ipv4_network", ipv4_network);
+    try appendBsonStringElement(&out, allocator, "ipv6_network", ipv6_network);
+    try appendBsonI32Element(&out, allocator, "version", fake_dns_storage_version);
+    try finishBsonDocument(&out, allocator);
+    return out.toOwnedSlice(allocator);
+}
+
+fn encodeIpAddrMapping(allocator: std.mem.Allocator, domain: []const u8, expire_unix: i64) ![]u8 {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(allocator);
+    try out.appendNTimes(allocator, 0, 4);
+    try appendBsonStringElement(&out, allocator, "domain_name", domain);
+    try appendBsonI64Element(&out, allocator, "expire_time", expire_unix);
+    try finishBsonDocument(&out, allocator);
+    return out.toOwnedSlice(allocator);
+}
+
+fn encodeDomainNameMapping(allocator: std.mem.Allocator, ipv4_addr: []const u8, ipv6_addr: []const u8, expire_unix: i64) ![]u8 {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(allocator);
+    try out.appendNTimes(allocator, 0, 4);
+    try appendBsonStringElement(&out, allocator, "ipv4_addr", ipv4_addr);
+    try appendBsonStringElement(&out, allocator, "ipv6_addr", ipv6_addr);
+    try appendBsonI64Element(&out, allocator, "expire_time", expire_unix);
+    try finishBsonDocument(&out, allocator);
+    return out.toOwnedSlice(allocator);
+}
+
+fn decodeStorageMeta(allocator: std.mem.Allocator, bytes: []const u8) !StorageMeta {
+    var fields = try decodeBsonDocument(allocator, bytes);
+    errdefer fields.deinit(allocator);
+    const version_i64 = fields.version orelse return error.InvalidBson;
+    return .{
+        .ipv4_network = fields.ipv4_network orelse return error.InvalidBson,
+        .ipv6_network = fields.ipv6_network orelse return error.InvalidBson,
+        .version = std.math.cast(u32, version_i64) orelse return error.InvalidBson,
+    };
+}
+
+fn decodeDomainNameMapping(allocator: std.mem.Allocator, bytes: []const u8) !DomainNameMapping {
+    var fields = try decodeBsonDocument(allocator, bytes);
+    errdefer fields.deinit(allocator);
+    return .{
+        .ipv4_addr = fields.ipv4_addr orelse try allocator.dupe(u8, ""),
+        .ipv6_addr = fields.ipv6_addr orelse try allocator.dupe(u8, ""),
+        .expire_unix = fields.expire_time orelse return error.InvalidBson,
+    };
+}
+
+fn appendBsonStringElement(out: *std.ArrayList(u8), allocator: std.mem.Allocator, key: []const u8, value: []const u8) !void {
+    try out.append(allocator, 0x02);
+    try out.appendSlice(allocator, key);
+    try out.append(allocator, 0);
+    var len_bytes: [4]u8 = undefined;
+    std.mem.writeInt(i32, &len_bytes, @intCast(value.len + 1), .little);
+    try out.appendSlice(allocator, &len_bytes);
+    try out.appendSlice(allocator, value);
+    try out.append(allocator, 0);
+}
+
+fn appendBsonI32Element(out: *std.ArrayList(u8), allocator: std.mem.Allocator, key: []const u8, value: i32) !void {
+    try out.append(allocator, 0x10);
+    try out.appendSlice(allocator, key);
+    try out.append(allocator, 0);
+    var bytes: [4]u8 = undefined;
+    std.mem.writeInt(i32, &bytes, value, .little);
+    try out.appendSlice(allocator, &bytes);
+}
+
+fn appendBsonI64Element(out: *std.ArrayList(u8), allocator: std.mem.Allocator, key: []const u8, value: i64) !void {
+    try out.append(allocator, 0x12);
+    try out.appendSlice(allocator, key);
+    try out.append(allocator, 0);
+    var bytes: [8]u8 = undefined;
+    std.mem.writeInt(i64, &bytes, value, .little);
+    try out.appendSlice(allocator, &bytes);
+}
+
+fn finishBsonDocument(out: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
+    try out.append(allocator, 0);
+    std.mem.writeInt(i32, out.items[0..4], @intCast(out.items.len), .little);
+}
+
+const BsonFields = struct {
+    ipv4_network: ?[]u8 = null,
+    ipv6_network: ?[]u8 = null,
+    version: ?i64 = null,
+    ipv4_addr: ?[]u8 = null,
+    ipv6_addr: ?[]u8 = null,
+    expire_time: ?i64 = null,
+
+    fn deinit(self: *BsonFields, allocator: std.mem.Allocator) void {
+        if (self.ipv4_network) |v| allocator.free(v);
+        if (self.ipv6_network) |v| allocator.free(v);
+        if (self.ipv4_addr) |v| allocator.free(v);
+        if (self.ipv6_addr) |v| allocator.free(v);
+        self.* = .{};
+    }
+};
+
+fn decodeBsonDocument(allocator: std.mem.Allocator, bytes: []const u8) !BsonFields {
+    if (bytes.len < 5) return error.InvalidBson;
+    const declared_len = std.mem.readInt(i32, bytes[0..4], .little);
+    if (declared_len < 5 or @as(usize, @intCast(declared_len)) > bytes.len) return error.InvalidBson;
+    const doc = bytes[0..@intCast(declared_len)];
+    if (doc[doc.len - 1] != 0) return error.InvalidBson;
+
+    var fields = BsonFields{};
+    errdefer fields.deinit(allocator);
+    var pos: usize = 4;
+    while (pos < doc.len - 1) {
+        const tag = doc[pos];
+        pos += 1;
+        const key_start = pos;
+        while (pos < doc.len and doc[pos] != 0) : (pos += 1) {}
+        if (pos >= doc.len) return error.InvalidBson;
+        const key = doc[key_start..pos];
+        pos += 1;
+
+        switch (tag) {
+            0x02 => {
+                if (pos + 4 > doc.len) return error.InvalidBson;
+                const len = std.mem.readInt(i32, doc[pos..][0..4], .little);
+                pos += 4;
+                if (len <= 0) return error.InvalidBson;
+                const string_len: usize = @intCast(len - 1);
+                if (pos + string_len + 1 > doc.len or doc[pos + string_len] != 0) return error.InvalidBson;
+                const value = try allocator.dupe(u8, doc[pos..][0..string_len]);
+                errdefer allocator.free(value);
+                try assignBsonString(&fields, allocator, key, value);
+                pos += string_len + 1;
+            },
+            0x10 => {
+                if (pos + 4 > doc.len) return error.InvalidBson;
+                const value: i64 = std.mem.readInt(i32, doc[pos..][0..4], .little);
+                assignBsonInt(&fields, key, value);
+                pos += 4;
+            },
+            0x12 => {
+                if (pos + 8 > doc.len) return error.InvalidBson;
+                const value = std.mem.readInt(i64, doc[pos..][0..8], .little);
+                assignBsonInt(&fields, key, value);
+                pos += 8;
+            },
+            else => return error.InvalidBson,
+        }
+    }
+    return fields;
+}
+
+fn assignBsonString(fields: *BsonFields, allocator: std.mem.Allocator, key: []const u8, value: []u8) !void {
+    if (std.mem.eql(u8, key, "ipv4_network")) {
+        if (fields.ipv4_network) |old| allocator.free(old);
+        fields.ipv4_network = value;
+    } else if (std.mem.eql(u8, key, "ipv6_network")) {
+        if (fields.ipv6_network) |old| allocator.free(old);
+        fields.ipv6_network = value;
+    } else if (std.mem.eql(u8, key, "ipv4_addr")) {
+        if (fields.ipv4_addr) |old| allocator.free(old);
+        fields.ipv4_addr = value;
+    } else if (std.mem.eql(u8, key, "ipv6_addr")) {
+        if (fields.ipv6_addr) |old| allocator.free(old);
+        fields.ipv6_addr = value;
+    } else {
+        allocator.free(value);
+    }
+}
+
+fn assignBsonInt(fields: *BsonFields, key: []const u8, value: i64) void {
+    if (std.mem.eql(u8, key, "version")) fields.version = value;
+    if (std.mem.eql(u8, key, "expire_time")) fields.expire_time = value;
 }
 
 fn appendInt(out: *std.ArrayList(u8), allocator: std.mem.Allocator, value: anytype) !void {
@@ -562,4 +1008,40 @@ test "fake DNS database persists IPv4 and IPv6 mappings" {
         const ip6 = try manager.mapDomainIpv6(io, "persist.example");
         try std.testing.expectEqualSlices(u8, &[_]u8{ 0xfc, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, &ip6);
     }
+}
+
+test "fake DNS RocksDB backend persists upstream-compatible keys" {
+    if (!build_options.rocksdb) return error.SkipZigTest;
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const path = ".zig-cache/fakedns-rocksdb-test";
+    deleteTreeIgnoreMissing(io, path);
+    defer deleteTreeIgnoreMissing(io, path);
+
+    {
+        var manager = try Manager.init(std.testing.allocator, io, "10.240.0.0/30", "fc00:2::/126", path, 60);
+        defer manager.deinit();
+        const ip4 = try manager.mapDomainIpv4(io, "Rocks.EXAMPLE");
+        try std.testing.expectEqualSlices(u8, &[_]u8{ 10, 240, 0, 1 }, &ip4);
+        const raw = (try manager.rocksdb_store.get(std.testing.allocator, "shadowsocks_fakedns_name2ip_rocks.example")).?;
+        defer std.testing.allocator.free(raw);
+        const decoded = try decodeDomainNameMapping(std.testing.allocator, raw);
+        defer decoded.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("10.240.0.1", decoded.ipv4_addr);
+    }
+
+    {
+        var manager = try Manager.init(std.testing.allocator, io, "10.240.0.0/30", "fc00:2::/126", path, 60);
+        defer manager.deinit();
+        const ip4 = try manager.mapDomainIpv4(io, "rocks.example");
+        try std.testing.expectEqualSlices(u8, &[_]u8{ 10, 240, 0, 1 }, &ip4);
+        const rewritten = manager.rewriteAddress(io, .{ .ipv4 = .{ .ip = ip4, .port = 443 } }).?;
+        try std.testing.expectEqualStrings("rocks.example", rewritten.domain.name);
+    }
+}
+
+fn deleteTreeIgnoreMissing(io: std.Io, path: []const u8) void {
+    std.Io.Dir.cwd().deleteTree(io, path) catch {};
 }

@@ -3,12 +3,16 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const enable_rocksdb = b.option(bool, "rocksdb", "Enable RocksDB-backed fake-DNS persistence") orelse false;
+    const build_options = b.addOptions();
+    build_options.addOption(bool, "rocksdb", enable_rocksdb);
     const mod = b.addModule("shadowsocks", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    configureNativeDeps(b, mod);
+    mod.addOptions("build_options", build_options);
+    configureNativeDeps(b, mod, enable_rocksdb);
 
     const exe = b.addExecutable(.{
         .name = "ss-zig",
@@ -34,15 +38,19 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    configureNativeDeps(b, tests.root_module);
+    tests.root_module.addOptions("build_options", build_options);
+    configureNativeDeps(b, tests.root_module, enable_rocksdb);
     const test_run = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&test_run.step);
 }
 
-fn configureNativeDeps(b: *std.Build, module: *std.Build.Module) void {
+fn configureNativeDeps(b: *std.Build, module: *std.Build.Module, enable_rocksdb: bool) void {
     module.linkSystemLibrary("uv", .{ .use_pkg_config = .force });
     module.linkSystemLibrary("re2", .{ .use_pkg_config = .force });
+    if (enable_rocksdb) {
+        module.linkSystemLibrary("rocksdb", .{ .use_pkg_config = .yes });
+    }
     module.linkSystemLibrary("c++", .{});
     module.addIncludePath(b.path("src/deps"));
     module.addCSourceFiles(.{

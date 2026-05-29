@@ -27,7 +27,8 @@ jobs:
             build-essential \
             pkg-config \
             libuv1-dev \
-            libre2-dev
+            libre2-dev \
+            librocksdb-dev
 
       - name: Install Zig 0.16.0
         run: |
@@ -42,11 +43,15 @@ jobs:
       - name: Unit tests
         run: zig build test
 
+      - name: RocksDB fake-DNS tests
+        run: zig build test -Drocksdb=true
+
       - name: Target compile checks
         run: |
-          zig test src/root.zig -target x86_64-linux-gnu -I src/deps -fno-emit-bin
-          zig test src/root.zig -target x86_64-freebsd -I src/deps -fno-emit-bin
-          zig test src/root.zig -target x86_64-openbsd -I src/deps -fno-emit-bin
+          printf 'pub const rocksdb = false;\n' > "$RUNNER_TEMP/build_options.zig"
+          zig test -target x86_64-linux-gnu -I src/deps --dep build_options -Mroot=src/root.zig -Mbuild_options="$RUNNER_TEMP/build_options.zig" -fno-emit-bin
+          zig test -target x86_64-freebsd -I src/deps --dep build_options -Mroot=src/root.zig -Mbuild_options="$RUNNER_TEMP/build_options.zig" -fno-emit-bin
+          zig test -target x86_64-openbsd -I src/deps --dep build_options -Mroot=src/root.zig -Mbuild_options="$RUNNER_TEMP/build_options.zig" -fno-emit-bin
 
       - name: Build
         run: zig build

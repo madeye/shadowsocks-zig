@@ -43,9 +43,10 @@ Current state:
 - TCP and UDP fake-DNS local mode via `protocol = "fake-dns"` with
   `fake_dns_ipv4_network`, `fake_dns_ipv6_network`, and
   `fake_dns_record_expire_duration`. The current implementation allocates
-  A/AAAA mappings, persists them to `fake_dns_database_path` as a small JSON
-  cache when configured, and substitutes mapped fake IP targets back to domains
-  in SOCKS/HTTP local paths.
+  A/AAAA mappings, persists them to `fake_dns_database_path`, and substitutes
+  mapped fake IP targets back to domains in SOCKS/HTTP local paths. Default
+  builds keep the existing JSON fallback; `zig build -Drocksdb=true` enables
+  the shadowsocks-rust-compatible RocksDB/BSON key layout.
 - TCP `ss-server` path for supported ciphers.
 - UDP `ss-local` SOCKS5 UDP ASSOCIATE path for supported ciphers.
 - UDP `ss-server` path for supported ciphers.
@@ -84,8 +85,10 @@ Build and test with Zig 0.16.0:
 ```
 
 Native dependencies are linked through `pkg-config`: `re2` for ACL regex
-handling and `libuv` for TCP/UDP readiness polling. Crypto uses Zig
-`std.crypto` where the required primitives are available.
+handling and `libuv` for TCP/UDP readiness polling. `rocksdb` is optional and
+is linked only for `zig build -Drocksdb=true`, which enables
+shadowsocks-rust-compatible fake-DNS persistence. Crypto uses Zig `std.crypto`
+where the required primitives are available.
 
 Interop smoke test used:
 
@@ -254,5 +257,4 @@ Latest libuv/Zig 0.16 smoke checks:
 Remaining high-level port work:
 
 - Remaining specialized local protocol work from shadowsocks-rust/libev: full
-  BSD/macOS pf/ipfw integration tests with kernel rules, tun interfaces, and
-  RocksDB-compatible fake-DNS storage.
+  BSD/macOS pf/ipfw integration tests with kernel rules and tun interfaces.
