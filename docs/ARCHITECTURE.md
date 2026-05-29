@@ -152,4 +152,7 @@ The supported cipher surface is AEAD-only. SIP004 methods include
 `2022-blake3-aes-128-gcm`, `2022-blake3-aes-256-gcm`, and
 `2022-blake3-chacha20-poly1305`. Non-AEAD legacy stream methods such as
 AES-CFB, AES-CTR, RC4-MD5, Salsa20, and plain ChaCha20 are intentionally not
-accepted by config parsing.
+accepted by config parsing. Libev-compatible raw base64 keys are accepted from
+the JSON `key` field and from the CLI `--key` override; when a password
+override is supplied without `--key`, any configured raw key is cleared so key
+derivation uses the new password.

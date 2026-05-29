@@ -13,7 +13,7 @@ const usage =
     \\ss-tunnel -s <server> -p <port> -k <password> -m <method> -l <local_port> -L <target:port>
     \\
     \\Mode-specific executable names infer --local, --server, or --manager. Explicit mode flags override the executable-name default.
-    \\Common libev flags are accepted: -s, -p, -b, -l, -k, -m, -t, -u, -U, -L, --plugin, --plugin-opts, --acl, --manager-address, --no-delay, and --reuse-port.
+    \\Common libev flags are accepted: -s, -p, -b, -l, -k, -m, -t, -u, -U, -L, --key, --plugin, --plugin-opts, --acl, --manager-address, --no-delay, and --reuse-port.
     \\--local runs TCP SOCKS5/SOCKS4/HTTP/DNS/Tunnel/Redir/Fake-DNS ss-local; --server runs TCP/UDP ss-server; --manager runs the manager control API.
     \\
 ;
@@ -75,6 +75,8 @@ pub fn main(init: std.process.Init) !void {
             overrides.local_port = try parsePortArg(args.next() orelse return invalidArgs(io));
         } else if (std.mem.eql(u8, arg, "-k") or std.mem.eql(u8, arg, "--password")) {
             overrides.password = args.next() orelse return invalidArgs(io);
+        } else if (std.mem.eql(u8, arg, "--key")) {
+            overrides.key = args.next() orelse return invalidArgs(io);
         } else if (std.mem.eql(u8, arg, "-m")) {
             overrides.method = shadowsocks.crypto.CipherKind.parse(args.next() orelse return invalidArgs(io)) catch return error.InvalidCipher;
         } else if (std.mem.eql(u8, arg, "-t")) {

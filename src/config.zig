@@ -159,6 +159,7 @@ pub const Overrides = struct {
     local_host: ?[]const u8 = null,
     local_port: ?u16 = null,
     password: ?[]const u8 = null,
+    key: ?[]const u8 = null,
     method: ?crypto.CipherKind = null,
     timeout_seconds: ?u64 = null,
     mode: ?Mode = null,
@@ -180,6 +181,7 @@ pub const Overrides = struct {
             self.local_host != null or
             self.local_port != null or
             self.password != null or
+            self.key != null or
             self.method != null or
             self.timeout_seconds != null or
             self.mode != null or
@@ -244,7 +246,9 @@ pub const Config = struct {
         const timeout = overrides.timeout_seconds orelse 300;
         const server_host = overrides.server_host orelse return error.MissingServer;
         const server_port = overrides.server_port orelse return error.MissingServerPort;
-        const password = overrides.password orelse return error.MissingPassword;
+        const password = overrides.password;
+        const key = overrides.key;
+        if (password == null and key == null) return error.MissingPassword;
         const forward_host = overrides.forward_host;
         const forward_port = overrides.forward_port;
         if ((protocol == .tunnel or protocol == .dns) and (forward_host == null or forward_port == null)) {
@@ -255,8 +259,8 @@ pub const Config = struct {
         servers[0] = .{
             .host = try a.dupe(u8, server_host),
             .port = server_port,
-            .password = try a.dupe(u8, password),
-            .key = null,
+            .password = try a.dupe(u8, password orelse ""),
+            .key = try dupeOptionalSlice(a, key),
             .method = overrides.method orelse .aes_256_gcm,
             .mode = mode,
             .no_delay = overrides.no_delay orelse false,
@@ -311,6 +315,8 @@ pub const Config = struct {
             if (overrides.server_host) |host| server.host = try a.dupe(u8, host);
             if (overrides.server_port) |port| server.port = port;
             if (overrides.password) |password| server.password = try a.dupe(u8, password);
+            if (overrides.password != null and overrides.key == null) server.key = null;
+            if (overrides.key) |key| server.key = try a.dupe(u8, key);
             if (overrides.method) |method| server.method = method;
             if (overrides.mode) |mode| server.mode = mode;
             if (overrides.acl_path) |acl_path| server.acl_path = try a.dupe(u8, acl_path);
@@ -864,6 +870,20 @@ test "build config from libev-style CLI overrides" {
     try std.testing.expectEqualStrings("obfs=tls", cfg.servers[0].plugin_opts.?);
 }
 
+test "build config from libev-style CLI raw key override" {
+    var cfg = try Config.fromOverrides(std.testing.allocator, .{
+        .server_host = "198.51.100.10",
+        .server_port = 8388,
+        .key = "AQIDBAUGBwgJCgsMDQ4PEA==",
+        .method = .aes_128_gcm,
+    });
+    defer cfg.deinit();
+
+    try std.testing.expectEqualStrings("", cfg.servers[0].password);
+    try std.testing.expectEqualStrings("AQIDBAUGBwgJCgsMDQ4PEA==", cfg.servers[0].key.?);
+    try std.testing.expectEqual(crypto.CipherKind.aes_128_gcm, cfg.servers[0].method);
+}
+
 test "apply CLI overrides to parsed config" {
     var cfg = try Config.parseSlice(std.testing.allocator,
         \\{
@@ -902,6 +922,44 @@ test "apply CLI overrides to parsed config" {
     try std.testing.expect(cfg.locals[0].no_delay);
     try std.testing.expect(cfg.servers[0].reuse_port);
     try std.testing.expect(cfg.locals[0].reuse_port);
+}
+
+test "apply CLI password override clears configured raw key" {
+    var cfg = try Config.parseSlice(std.testing.allocator,
+        \\{
+        \\  "server": "127.0.0.1",
+        \\  "server_port": 8388,
+        \\  "key": "AQIDBAUGBwgJCgsMDQ4PEA==",
+        \\  "method": "aes-128-gcm"
+        \\}
+    );
+    defer cfg.deinit();
+
+    try cfg.applyOverrides(.{
+        .password = "override",
+    });
+
+    try std.testing.expectEqualStrings("override", cfg.servers[0].password);
+    try std.testing.expect(cfg.servers[0].key == null);
+}
+
+test "apply CLI raw key override replaces configured password derivation" {
+    var cfg = try Config.parseSlice(std.testing.allocator,
+        \\{
+        \\  "server": "127.0.0.1",
+        \\  "server_port": 8388,
+        \\  "password": "secret",
+        \\  "method": "aes-128-gcm"
+        \\}
+    );
+    defer cfg.deinit();
+
+    try cfg.applyOverrides(.{
+        .key = "AQIDBAUGBwgJCgsMDQ4PEA==",
+    });
+
+    try std.testing.expectEqualStrings("secret", cfg.servers[0].password);
+    try std.testing.expectEqualStrings("AQIDBAUGBwgJCgsMDQ4PEA==", cfg.servers[0].key.?);
 }
 
 test "parse libev classic server array" {
