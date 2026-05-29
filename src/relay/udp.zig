@@ -47,7 +47,7 @@ pub fn runLocal(
     udp_max_associations: ?usize,
     fake_dns_manager: ?*fake_dns.Manager,
 ) !void {
-    var local_socket = try netio.bindUdp(local_cfg.host, local_cfg.port, local_cfg.reuse_port);
+    var local_socket = try netio.bindUdp(local_cfg.udpBindHost(), local_cfg.udpBindPort(), local_cfg.reuse_port);
     defer local_socket.close();
 
     var associations = std.AutoHashMap(u64, *Association).init(allocator);
@@ -119,7 +119,7 @@ pub fn runLocalRedir(
     udp_timeout_seconds: u64,
     udp_max_associations: ?usize,
 ) !void {
-    var local_socket = try netio.bindUdpRedirListen(local_cfg.host, local_cfg.port, local_cfg.udp_redir, local_cfg.reuse_port);
+    var local_socket = try netio.bindUdpRedirListen(local_cfg.udpBindHost(), local_cfg.udpBindPort(), local_cfg.udp_redir, local_cfg.reuse_port);
     defer local_socket.close();
 
     var associations = std.AutoHashMap(u64, *Association).init(allocator);
@@ -188,7 +188,7 @@ pub fn runFakeDnsLocal(
     manager: *fake_dns.Manager,
 ) !void {
     _ = allocator;
-    var local_socket = try netio.bindUdp(local_cfg.host, local_cfg.port, local_cfg.reuse_port);
+    var local_socket = try netio.bindUdp(local_cfg.udpBindHost(), local_cfg.udpBindPort(), local_cfg.reuse_port);
     defer local_socket.close();
 
     var buf: [max_udp_packet_size]u8 = undefined;
@@ -210,7 +210,7 @@ pub fn runLocalTunnel(
     udp_timeout_seconds: u64,
     udp_max_associations: ?usize,
 ) !void {
-    var local_socket = try netio.bindUdp(local_cfg.host, local_cfg.port, local_cfg.reuse_port);
+    var local_socket = try netio.bindUdp(local_cfg.udpBindHost(), local_cfg.udpBindPort(), local_cfg.reuse_port);
     defer local_socket.close();
 
     var associations = std.AutoHashMap(u64, *Association).init(allocator);
@@ -280,7 +280,7 @@ pub fn runDnsLocal(
     udp_timeout_seconds: u64,
     udp_max_associations: ?usize,
 ) !void {
-    var local_socket = try netio.bindUdp(local_cfg.host, local_cfg.port, local_cfg.reuse_port);
+    var local_socket = try netio.bindUdp(local_cfg.udpBindHost(), local_cfg.udpBindPort(), local_cfg.reuse_port);
     defer local_socket.close();
 
     var associations = std.AutoHashMap(u64, *Association).init(allocator);

@@ -1,0 +1,21 @@
+{
+  "servers": [
+    {
+      "server": "127.0.0.1",
+      "server_port": 8429,
+      "password": "secret",
+      "method": "aes-128-gcm",
+      "mode": "tcp_and_udp"
+    }
+  ],
+  "locals": [
+    {
+      "local_address": "127.0.0.1",
+      "local_port": 1129,
+      "local_udp_address": "127.0.0.1",
+      "local_udp_port": 1130,
+      "protocol": "socks",
+      "mode": "tcp_and_udp"
+    }
+  ]
+}

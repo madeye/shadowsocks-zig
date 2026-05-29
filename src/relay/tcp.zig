@@ -1354,7 +1354,7 @@ fn unspecifiedAddress() ss_address.Address {
 }
 
 fn localBindAddress(local_cfg: config.Local) !ss_address.Address {
-    const addr = try netio.net.IpAddress.parse(local_cfg.host, local_cfg.port);
+    const addr = try netio.net.IpAddress.parse(local_cfg.udpBindHost(), local_cfg.udpBindPort());
     return switch (addr) {
         .ip4 => |ip4| .{ .ipv4 = .{ .ip = ip4.bytes, .port = ip4.port } },
         .ip6 => |ip6| .{ .ipv6 = .{ .ip = ip6.bytes, .port = ip6.port } },

@@ -39,6 +39,9 @@ UDP association lifecycle follows the shadowsocks-rust global config fields:
 Local SOCKS5 UDP associations are retired after idleness or worker closure.
 Server-side target-to-client mappings are expired by the same timeout and evict
 the oldest mapping when a configured capacity is reached.
+Local UDP listeners use shadowsocks-rust's `local_udp_address` /
+`local_udp_port` override when `local_udp_port` is configured; otherwise they
+bind the same address and port as the TCP local listener.
 
 SIP003 TCP plugins are spawned as child processes when a server has `plugin`
 configured. `plugin_args` are appended to the plugin process argv. The process

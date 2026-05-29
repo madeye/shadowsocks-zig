@@ -16,6 +16,8 @@ Current state:
   started from shadowsocks-rust-style extended JSON configs. Local mode honors
   per-server `tcp_weight` and `udp_weight` values with separate TCP and UDP
   round-robin selectors; a zero weight excludes that server for the protocol.
+  Extended local `local_udp_address` / `local_udp_port` are honored when a UDP
+  listener should bind separately from the TCP listener.
 - SOCKS5, SOCKS4/4a, HTTP proxy, and Shadowsocks address codecs.
 - SIP004 AEAD primitives for `aes-128-gcm`, `aes-256-gcm`,
   `chacha20-ietf-poly1305`, and `xchacha20-ietf-poly1305`, backed by Zig
@@ -94,7 +96,9 @@ Current state:
   for configured server endpoints and direct outbound target connects.
   Libev-style TCP buffer sizes set SO_SNDBUF/SO_RCVBUF on accepted incoming TCP
   sockets and outbound TCP connect sockets. In server mode, libev outbound bind
-  addresses are applied before connecting to TCP targets.
+  addresses are applied before connecting to TCP targets. In local mode,
+  shadowsocks-rust-style `local_udp_address` / `local_udp_port` override UDP
+  bind addresses for SOCKS, tunnel, redir, DNS, and fake-DNS UDP listeners.
 - Server-side AEAD salt replay rejection with a shared rotating replay filter.
 - SOCKS5 username/password authentication for TCP local mode via
   `socks5_auth_config_path`.

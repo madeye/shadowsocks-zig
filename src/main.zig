@@ -206,6 +206,9 @@ pub fn main(init: std.process.Init) !void {
         }
         for (cfg.locals) |local_cfg| {
             try stdout.print("local {s}:{d} protocol={s} mode={s}", .{ local_cfg.host, local_cfg.port, local_cfg.protocol.name(), @tagName(local_cfg.mode) });
+            if (local_cfg.udp_port != null) {
+                try stdout.print(" udp={s}:{d}", .{ local_cfg.udpBindHost(), local_cfg.udpBindPort() });
+            }
             if (local_cfg.protocol == .redir) {
                 try stdout.print(" tcp_redir={s} udp_redir={s}", .{ local_cfg.tcp_redir.name(), local_cfg.udp_redir.name() });
             }

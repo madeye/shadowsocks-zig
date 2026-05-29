@@ -155,6 +155,8 @@ pub const Server = struct {
 pub const Local = struct {
     host: []const u8,
     port: u16,
+    udp_host: ?[]const u8,
+    udp_port: ?u16,
     mode: Mode,
     protocol: LocalProtocol,
     tcp_redir: RedirType,
@@ -173,6 +175,15 @@ pub const Local = struct {
     fake_dns_record_expire_duration: u64,
     acl_path: ?[]const u8,
     socks5_users: []const Socks5User,
+
+    pub fn udpBindHost(self: Local) []const u8 {
+        if (self.udp_port != null) return self.udp_host orelse self.host;
+        return self.host;
+    }
+
+    pub fn udpBindPort(self: Local) u16 {
+        return self.udp_port orelse self.port;
+    }
 };
 
 pub const Socks5User = struct {
@@ -327,6 +338,8 @@ pub const Config = struct {
         locals[0] = .{
             .host = try a.dupe(u8, overrides.local_host orelse "127.0.0.1"),
             .port = overrides.local_port orelse 1080,
+            .udp_host = null,
+            .udp_port = null,
             .mode = mode,
             .protocol = protocol,
             .tcp_redir = overrides.tcp_redir orelse RedirType.tcpDefault(),
@@ -524,9 +537,12 @@ pub const Config = struct {
             return error.MissingForwardAddress;
         }
         const local_dns_host = if (protocol == .dns) try parseLocalDnsHost(allocator, object, root) else null;
+        const local_udp_port = try parseOptionalPort(object.get("local_udp_port") orelse root.get("local_udp_port"));
         return .{
             .host = try dupString(allocator, object.get("local_address") orelse root.get("local_address") orelse std.json.Value{ .string = "127.0.0.1" }),
             .port = @intCast(asU64(object.get("local_port") orelse root.get("local_port") orelse std.json.Value{ .integer = 1080 }) orelse 1080),
+            .udp_host = if (local_udp_port != null) try dupOptionalNonEmptyString(allocator, object.get("local_udp_address") orelse root.get("local_udp_address")) else null,
+            .udp_port = local_udp_port,
             .mode = parseLocalMode(protocol, asString(object.get("mode") orelse root.get("mode"))),
             .protocol = protocol,
             .tcp_redir = try RedirType.parse(asString(object.get("tcp_redir") orelse root.get("tcp_redir")), RedirType.tcpDefault()),
@@ -700,6 +716,13 @@ fn parseLocalDnsPort(object: std.json.ObjectMap, root: std.json.ObjectMap) ?u16 
 fn parsePortWithDefault(value: ?std.json.Value, default: u16) ?u16 {
     const port = asU64(value) orelse return default;
     if (port == 0 or port > std.math.maxInt(u16)) return null;
+    return @intCast(port);
+}
+
+fn parseOptionalPort(value: ?std.json.Value) ConfigError!?u16 {
+    if (value == null) return null;
+    const port = asU64(value) orelse return error.InvalidConfig;
+    if (port == 0 or port > std.math.maxInt(u16)) return error.InvalidConfig;
     return @intCast(port);
 }
 
@@ -920,6 +943,8 @@ test "parse classic shadowsocks config" {
         \\  "local_address": "127.0.0.1",
         \\  "local_ipv6_address": "::1",
         \\  "local_port": 1080,
+        \\  "local_udp_address": "127.0.0.2",
+        \\  "local_udp_port": 1081,
         \\  "password": "secret",
         \\  "method": "aes-256-gcm",
         \\  "mode": "tcp_and_udp",
@@ -958,6 +983,10 @@ test "parse classic shadowsocks config" {
     try std.testing.expectEqualStrings("tests/local.acl", cfg.servers[0].acl_path.?);
     try std.testing.expectEqualStrings("tests/local.acl", cfg.locals[0].acl_path.?);
     try std.testing.expectEqual(@as(u16, 1080), cfg.locals[0].port);
+    try std.testing.expectEqualStrings("127.0.0.2", cfg.locals[0].udp_host.?);
+    try std.testing.expectEqual(@as(?u16, 1081), cfg.locals[0].udp_port);
+    try std.testing.expectEqualStrings("127.0.0.2", cfg.locals[0].udpBindHost());
+    try std.testing.expectEqual(@as(u16, 1081), cfg.locals[0].udpBindPort());
     try std.testing.expectEqual(Mode.tcp_and_udp, cfg.locals[0].mode);
     try std.testing.expect(cfg.servers[0].no_delay);
     try std.testing.expect(cfg.locals[0].no_delay);
@@ -1336,6 +1365,8 @@ test "parse shadowsocks-rust extended servers/locals config" {
         \\    {
         \\      "local_address": "127.0.0.1",
         \\      "local_port": 1081,
+        \\      "local_udp_address": "127.0.0.2",
+        \\      "local_udp_port": 1082,
         \\      "protocol": "socks",
         \\      "socks5_auth": {
         \\        "password": {
@@ -1359,7 +1390,21 @@ test "parse shadowsocks-rust extended servers/locals config" {
     try std.testing.expectEqual(@as(u16, 50), cfg.servers[1].udp_weight);
     try std.testing.expectEqual(@as(usize, 1), cfg.locals[0].socks5_users.len);
     try std.testing.expectEqual(LocalProtocol.socks, cfg.locals[0].protocol);
+    try std.testing.expectEqualStrings("127.0.0.2", cfg.locals[0].udp_host.?);
+    try std.testing.expectEqual(@as(?u16, 1082), cfg.locals[0].udp_port);
     try std.testing.expectEqualStrings("alice", cfg.locals[0].socks5_users[0].user_name);
+}
+
+test "parse rejects invalid local UDP port" {
+    try std.testing.expectError(error.InvalidConfig, Config.parseSlice(std.testing.allocator,
+        \\{
+        \\  "server": "127.0.0.1",
+        \\  "server_port": 8388,
+        \\  "password": "secret",
+        \\  "method": "aes-128-gcm",
+        \\  "local_udp_port": 0
+        \\}
+    ));
 }
 
 test "parse rejects extended config with no enabled servers or locals" {
