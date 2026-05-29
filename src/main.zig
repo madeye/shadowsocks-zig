@@ -13,7 +13,7 @@ const usage =
     \\ss-tunnel -s <server> -p <port> -k <password> -m <method> -l <local_port> -L <target:port>
     \\
     \\Mode-specific executable names infer --local, --server, or --manager. Explicit mode flags override the executable-name default.
-    \\Common libev flags are accepted: -s, -p, -b, -l, -k, -m, -t, -u, -U, -L, --key, --plugin, --plugin-opts, --acl, --manager-address, --no-delay, and --reuse-port.
+    \\Common libev flags are accepted: -s, -p, -b, -l, -k, -m, -t, -u, -U, -L, -6, --key, --plugin, --plugin-opts, --acl, --manager-address, --no-delay, and --reuse-port.
     \\--local runs TCP SOCKS5/SOCKS4/HTTP/DNS/Tunnel/Redir/Fake-DNS ss-local; --server runs TCP/UDP ss-server; --manager runs the manager control API.
     \\
 ;
@@ -111,7 +111,9 @@ pub fn main(init: std.process.Init) !void {
             overrides.no_delay = true;
         } else if (std.mem.eql(u8, arg, "--reuse-port")) {
             overrides.reuse_port = true;
-        } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "-6") or std.mem.eql(u8, arg, "--fast-open")) {
+        } else if (std.mem.eql(u8, arg, "-6")) {
+            overrides.ipv6_first = true;
+        } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--fast-open")) {
             continue;
         } else {
             try std.Io.File.stderr().writeStreamingAll(io, usage);
@@ -175,6 +177,9 @@ pub fn main(init: std.process.Init) !void {
             if (server_cfg.acl_path) |acl_path| {
                 try stdout.print("  acl={s}\n", .{acl_path});
             }
+            if (server_cfg.ipv6_first) {
+                try stdout.print("  ipv6_first=true\n", .{});
+            }
         }
         for (cfg.locals) |local_cfg| {
             try stdout.print("local {s}:{d} protocol={s} mode={s}", .{ local_cfg.host, local_cfg.port, local_cfg.protocol.name(), @tagName(local_cfg.mode) });
@@ -198,6 +203,9 @@ pub fn main(init: std.process.Init) !void {
             }
             if (local_cfg.acl_path) |acl_path| {
                 try stdout.print(" acl={s}", .{acl_path});
+            }
+            if (local_cfg.ipv6_first) {
+                try stdout.print(" ipv6_first=true", .{});
             }
             try stdout.print("\n", .{});
         }

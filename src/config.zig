@@ -105,6 +105,7 @@ pub const Server = struct {
     mode: Mode,
     no_delay: bool,
     reuse_port: bool,
+    ipv6_first: bool,
     tcp_weight: u16,
     udp_weight: u16,
     acl_path: ?[]const u8,
@@ -123,6 +124,7 @@ pub const Local = struct {
     udp_redir: RedirType,
     no_delay: bool,
     reuse_port: bool,
+    ipv6_first: bool,
     forward_host: ?[]const u8,
     forward_port: ?u16,
     local_dns_host: ?[]const u8,
@@ -174,6 +176,7 @@ pub const Overrides = struct {
     plugin_opts: ?[]const u8 = null,
     no_delay: ?bool = null,
     reuse_port: ?bool = null,
+    ipv6_first: ?bool = null,
 
     pub fn hasAny(self: Overrides) bool {
         return self.server_host != null or
@@ -195,7 +198,8 @@ pub const Overrides = struct {
             self.plugin != null or
             self.plugin_opts != null or
             self.no_delay != null or
-            self.reuse_port != null;
+            self.reuse_port != null or
+            self.ipv6_first != null;
     }
 };
 
@@ -265,6 +269,7 @@ pub const Config = struct {
             .mode = mode,
             .no_delay = overrides.no_delay orelse false,
             .reuse_port = overrides.reuse_port orelse false,
+            .ipv6_first = overrides.ipv6_first orelse false,
             .tcp_weight = server_weight_scale,
             .udp_weight = server_weight_scale,
             .acl_path = try dupeOptionalSlice(a, overrides.acl_path),
@@ -284,6 +289,7 @@ pub const Config = struct {
             .udp_redir = overrides.udp_redir orelse RedirType.udpDefault(),
             .no_delay = overrides.no_delay orelse false,
             .reuse_port = overrides.reuse_port orelse false,
+            .ipv6_first = overrides.ipv6_first orelse false,
             .forward_host = try dupeOptionalSlice(a, forward_host),
             .forward_port = forward_port,
             .local_dns_host = null,
@@ -325,6 +331,7 @@ pub const Config = struct {
             if (overrides.mode) |mode| server.plugin_mode = mode;
             if (overrides.no_delay) |no_delay| server.no_delay = no_delay;
             if (overrides.reuse_port) |reuse_port| server.reuse_port = reuse_port;
+            if (overrides.ipv6_first) |ipv6_first| server.ipv6_first = ipv6_first;
         }
         for (self.locals) |*local| {
             if (overrides.local_host) |host| local.host = try a.dupe(u8, host);
@@ -338,6 +345,7 @@ pub const Config = struct {
             if (overrides.acl_path) |acl_path| local.acl_path = try a.dupe(u8, acl_path);
             if (overrides.no_delay) |no_delay| local.no_delay = no_delay;
             if (overrides.reuse_port) |reuse_port| local.reuse_port = reuse_port;
+            if (overrides.ipv6_first) |ipv6_first| local.ipv6_first = ipv6_first;
             if ((local.protocol == .tunnel or local.protocol == .dns) and (local.forward_host == null or local.forward_port == null)) {
                 return error.MissingForwardAddress;
             }
@@ -434,6 +442,7 @@ pub const Config = struct {
             .mode = mode,
             .no_delay = asBool(object.get("no_delay") orelse root.get("no_delay")) orelse false,
             .reuse_port = asBool(object.get("reuse_port") orelse root.get("reuse_port")) orelse false,
+            .ipv6_first = asBool(object.get("ipv6_first") orelse root.get("ipv6_first")) orelse false,
             .tcp_weight = try parseWeight(object.get("tcp_weight") orelse root.get("tcp_weight")),
             .udp_weight = try parseWeight(object.get("udp_weight") orelse root.get("udp_weight")),
             .acl_path = try dupOptionalNonEmptyString(allocator, object.get("acl") orelse root.get("acl")),
@@ -463,6 +472,7 @@ pub const Config = struct {
             .udp_redir = try RedirType.parse(asString(object.get("udp_redir") orelse root.get("udp_redir")), RedirType.udpDefault()),
             .no_delay = asBool(object.get("no_delay") orelse root.get("no_delay")) orelse false,
             .reuse_port = asBool(object.get("reuse_port") orelse root.get("reuse_port")) orelse false,
+            .ipv6_first = asBool(object.get("ipv6_first") orelse root.get("ipv6_first")) orelse false,
             .forward_host = forward_host,
             .forward_port = forward_port,
             .local_dns_host = local_dns_host,
@@ -805,6 +815,7 @@ test "parse classic shadowsocks config" {
         \\  "manager_address": "127.0.0.1:6001",
         \\  "no_delay": true,
         \\  "reuse_port": true,
+        \\  "ipv6_first": true,
         \\  "udp_timeout": 10,
         \\  "udp_max_associations": 32
         \\}
@@ -832,6 +843,8 @@ test "parse classic shadowsocks config" {
     try std.testing.expect(cfg.locals[0].no_delay);
     try std.testing.expect(cfg.servers[0].reuse_port);
     try std.testing.expect(cfg.locals[0].reuse_port);
+    try std.testing.expect(cfg.servers[0].ipv6_first);
+    try std.testing.expect(cfg.locals[0].ipv6_first);
     try std.testing.expectEqualStrings("127.0.0.1", cfg.manager.?.host);
     try std.testing.expectEqual(@as(u16, 6001), cfg.manager.?.port);
     try std.testing.expectEqual(ManagerTransport.ip, cfg.manager.?.transport);
@@ -852,6 +865,7 @@ test "build config from libev-style CLI overrides" {
         .plugin_opts = "obfs=tls",
         .no_delay = true,
         .reuse_port = true,
+        .ipv6_first = true,
     });
     defer cfg.deinit();
 
@@ -866,6 +880,8 @@ test "build config from libev-style CLI overrides" {
     try std.testing.expect(cfg.locals[0].no_delay);
     try std.testing.expect(cfg.servers[0].reuse_port);
     try std.testing.expect(cfg.locals[0].reuse_port);
+    try std.testing.expect(cfg.servers[0].ipv6_first);
+    try std.testing.expect(cfg.locals[0].ipv6_first);
     try std.testing.expectEqualStrings("fake-plugin", cfg.servers[0].plugin.?);
     try std.testing.expectEqualStrings("obfs=tls", cfg.servers[0].plugin_opts.?);
 }
@@ -908,6 +924,7 @@ test "apply CLI overrides to parsed config" {
         .tcp_redir = .tproxy,
         .no_delay = true,
         .reuse_port = true,
+        .ipv6_first = true,
     });
 
     try std.testing.expectEqualStrings("203.0.113.7", cfg.servers[0].host);
@@ -922,6 +939,8 @@ test "apply CLI overrides to parsed config" {
     try std.testing.expect(cfg.locals[0].no_delay);
     try std.testing.expect(cfg.servers[0].reuse_port);
     try std.testing.expect(cfg.locals[0].reuse_port);
+    try std.testing.expect(cfg.servers[0].ipv6_first);
+    try std.testing.expect(cfg.locals[0].ipv6_first);
 }
 
 test "apply CLI password override clears configured raw key" {

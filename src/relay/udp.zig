@@ -70,7 +70,7 @@ pub fn runLocal(
                 if (associations.count() >= capacity) continue;
             }
             const server_cfg = try selectUdpServer(server_cfgs, server_next);
-            const server_addr = try netio.resolveIp(server_cfg.host, server_cfg.port);
+            const server_addr = try netio.resolveIpPreferred(server_cfg.host, server_cfg.port, server_cfg.ipv6_first);
             const remote_socket = try netio.openUdp(server_addr);
             errdefer remote_socket.close();
 
@@ -139,7 +139,7 @@ pub fn runLocalRedir(
                 if (associations.count() >= capacity) continue;
             }
             const server_cfg = try selectUdpServer(server_cfgs, server_next);
-            const server_addr = try netio.resolveIp(server_cfg.host, server_cfg.port);
+            const server_addr = try netio.resolveIpPreferred(server_cfg.host, server_cfg.port, server_cfg.ipv6_first);
             const remote_socket = try netio.openUdp(server_addr);
             errdefer remote_socket.close();
             const response_socket = try netio.bindUdpRedirResponse(received.to, local_cfg.udp_redir);
@@ -230,7 +230,7 @@ pub fn runLocalTunnel(
                 if (associations.count() >= capacity) continue;
             }
             const server_cfg = try selectUdpServer(server_cfgs, server_next);
-            const server_addr = try netio.resolveIp(server_cfg.host, server_cfg.port);
+            const server_addr = try netio.resolveIpPreferred(server_cfg.host, server_cfg.port, server_cfg.ipv6_first);
             const remote_socket = try netio.openUdp(server_addr);
             errdefer remote_socket.close();
 
@@ -295,7 +295,7 @@ pub fn runDnsLocal(
         const packet = buf[0..received.len];
         const target_address = dnsTargetAddress(io, packet, remote_dns_address, local_dns_address, access_control);
         if (local_dns_address != null and isSameAddress(target_address, local_dns_address.?)) {
-            try directUdpQuery(&local_socket, packet, received.from, target_address);
+            try directUdpQuery(&local_socket, packet, received.from, target_address, local_cfg.ipv6_first);
             continue;
         }
 
@@ -305,7 +305,7 @@ pub fn runDnsLocal(
                 if (associations.count() >= capacity) continue;
             }
             const server_cfg = try selectUdpServer(server_cfgs, server_next);
-            const server_addr = try netio.resolveIp(server_cfg.host, server_cfg.port);
+            const server_addr = try netio.resolveIpPreferred(server_cfg.host, server_cfg.port, server_cfg.ipv6_first);
             const remote_socket = try netio.openUdp(server_addr);
             errdefer remote_socket.close();
 
@@ -354,8 +354,8 @@ fn selectUdpServer(server_cfgs: []const config.Server, next_index: *std.atomic.V
     return error.UnsupportedCipher;
 }
 
-fn directUdpQuery(local_socket: *netio.UdpSocket, packet: []const u8, client_addr: netio.net.IpAddress, target_address: ss_address.Address) !void {
-    const target = try netio.shadowToIp(target_address);
+fn directUdpQuery(local_socket: *netio.UdpSocket, packet: []const u8, client_addr: netio.net.IpAddress, target_address: ss_address.Address, ipv6_first: bool) !void {
+    const target = try netio.shadowToIpPreferred(target_address, ipv6_first);
     var upstream = try netio.openUdp(target);
     defer upstream.close();
     _ = try upstream.sendTo(packet, target);
@@ -438,7 +438,7 @@ pub fn runServer(
 
             const parsed = ss_address.Address.read(plain) catch continue;
             if (outboundBlocked(access_control, io, parsed.address)) continue;
-            const target = netio.shadowToIp(parsed.address) catch continue;
+            const target = netio.shadowToIpPreferred(parsed.address, server_cfg.ipv6_first) catch continue;
             const target_key = netio.addressHash(target);
             const existing = target_to_client.get(target_key);
             if (!target_to_client.contains(netio.addressHash(target))) {

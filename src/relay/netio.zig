@@ -241,6 +241,11 @@ pub fn connectTcp(host: []const u8, port: u16) !TcpStream {
     return try connectTcpAddress(address);
 }
 
+pub fn connectTcpPreferred(host: []const u8, port: u16, ipv6_first: bool) !TcpStream {
+    const address = try resolveIpPreferred(host, port, ipv6_first);
+    return try connectTcpAddress(address);
+}
+
 pub fn connectTcpAddress(address: net.IpAddress) !TcpStream {
     var storage = ipAddressToPosix(address);
     const fd = try openPosixSocket(posixAddressFamily(address), std.posix.SOCK.STREAM);
@@ -385,6 +390,10 @@ pub fn openUdp(address: net.IpAddress) !UdpSocket {
 }
 
 pub fn resolveIp(host: []const u8, port: u16) !net.IpAddress {
+    return resolveIpPreferred(host, port, false);
+}
+
+pub fn resolveIpPreferred(host: []const u8, port: u16, ipv6_first: bool) !net.IpAddress {
     if (net.IpAddress.parse(host, port)) |address| return address else |_| {}
 
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
@@ -396,20 +405,33 @@ pub fn resolveIp(host: []const u8, port: u16) !net.IpAddress {
     var lookup_queue: std.Io.Queue(net.HostName.LookupResult) = .init(&lookup_buffer);
     try host_name.lookup(io, &lookup_queue, .{ .port = port });
 
+    var fallback: ?net.IpAddress = null;
     while (lookup_queue.getOne(io)) |result| switch (result) {
-        .address => |address| return address,
+        .address => |address| {
+            if (!ipv6_first) return address;
+            switch (address) {
+                .ip6 => return address,
+                .ip4 => {
+                    if (fallback == null) fallback = address;
+                },
+            }
+        },
         .canonical_name => continue,
     } else |err| switch (err) {
-        error.Closed => return error.UnknownHostName,
+        error.Closed => return fallback orelse error.UnknownHostName,
         else => |e| return e,
     }
 }
 
 pub fn shadowToIp(address: @import("../protocol/address.zig").Address) !net.IpAddress {
+    return shadowToIpPreferred(address, false);
+}
+
+pub fn shadowToIpPreferred(address: @import("../protocol/address.zig").Address, ipv6_first: bool) !net.IpAddress {
     return switch (address) {
         .ipv4 => |v| .{ .ip4 = .{ .bytes = v.ip, .port = v.port } },
         .ipv6 => |v| .{ .ip6 = .{ .bytes = v.ip, .port = v.port, .interface = .none } },
-        .domain => |d| try resolveIp(d.name, d.port),
+        .domain => |d| try resolveIpPreferred(d.name, d.port, ipv6_first),
     };
 }
 

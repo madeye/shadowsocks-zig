@@ -83,6 +83,12 @@ server. This is intentionally simpler than shadowsocks-rust's ping balancer,
 but keeps the same service ownership boundary and no longer collapses extended
 server configs to the first entry.
 
+The libev `ipv6_first` / `-6` option is stored on both server and local
+listener configs. Server configs use it when resolving configured server
+endpoints in local mode and when resolving outbound domain targets in server
+mode. Local configs use it for direct-bypass target connects and local DNS
+forwards.
+
 SOCKS5 username/password authentication follows shadowsocks-rust's
 `socks5_auth_config_path` convention. The file is parsed as:
 
