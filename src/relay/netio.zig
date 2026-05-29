@@ -813,6 +813,7 @@ const OriginalDestinationParser = enum {
 fn originalDestinationFromControl(msg: *const std.posix.msghdr, parser: OriginalDestinationParser) !net.IpAddress {
     var current = firstControlMessage(msg);
     while (current) |cmsg| {
+        if (!validControlMessage(msg, cmsg)) return error.RedirectionOriginalDestinationMissing;
         if (fullSockaddrOriginalDestination(cmsg, parser)) |address| {
             return address;
         } else |_| {}
@@ -924,12 +925,26 @@ fn firstControlMessage(msg: *const std.posix.msghdr) ?*std.c.cmsghdr {
 }
 
 fn nextControlMessage(msg: *const std.posix.msghdr, cmsg: *std.c.cmsghdr) ?*std.c.cmsghdr {
+    if (!validControlMessage(msg, cmsg)) return null;
     const base_raw: [*]u8 = @ptrCast(msg.control orelse return null);
     const current_raw: [*]u8 = @ptrCast(cmsg);
     const current_offset = @intFromPtr(current_raw) - @intFromPtr(base_raw);
     const next_offset = current_offset + controlMessageAlign(@intCast(cmsg.len));
     if (next_offset + @sizeOf(std.c.cmsghdr) > msg.controllen) return null;
     return @ptrCast(@alignCast(base_raw + next_offset));
+}
+
+fn validControlMessage(msg: *const std.posix.msghdr, cmsg: *const std.c.cmsghdr) bool {
+    const base = msg.control orelse return false;
+    const base_addr = @intFromPtr(base);
+    const cmsg_addr = @intFromPtr(cmsg);
+    if (cmsg_addr < base_addr) return false;
+    const offset = cmsg_addr - base_addr;
+    if (offset + @sizeOf(std.c.cmsghdr) > msg.controllen) return false;
+    const cmsg_len: usize = @intCast(cmsg.len);
+    if (cmsg_len < @sizeOf(std.c.cmsghdr)) return false;
+    if (offset + cmsg_len > msg.controllen) return false;
+    return true;
 }
 
 fn controlMessageData(cmsg: *const std.c.cmsghdr) []const u8 {
@@ -1335,6 +1350,17 @@ test "pf natlook address helpers preserve bytes and network order ports" {
 
     const restored = try pfNatlookResult(family, addr, port);
     try std.testing.expect(restored.eql(&.{ .ip4 = .{ .bytes = .{ 192, 0, 2, 10 }, .port = 5353 } }));
+
+    addr = std.mem.zeroes(PfAddr);
+    port = 0;
+    family = 0;
+    try fillPfLookupAddress(&addr, &port, &family, .{ .ip6 = .{ .bytes = .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x53 }, .port = 5354, .interface = .none } });
+    try std.testing.expectEqual(@as(u8, @intCast(std.posix.AF.INET6)), family);
+    try std.testing.expectEqual(std.mem.nativeToBig(u16, 5354), port);
+    try std.testing.expectEqualSlices(u8, &.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x53 }, std.mem.asBytes(&addr.words)[0..16]);
+
+    const restored_v6 = try pfNatlookResult(family, addr, port);
+    try std.testing.expect(restored_v6.eql(&.{ .ip6 = .{ .bytes = .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x53 }, .port = 5354, .interface = .none } }));
 }
 
 test "darwin pf UDP state parser recovers gateway destination" {
@@ -1373,6 +1399,46 @@ test "darwin pf UDP state parser recovers gateway destination" {
     try std.testing.expect(restored.eql(&.{ .ip4 = .{ .bytes = .{ 198, 51, 100, 7 }, .port = 53 } }));
 }
 
+test "darwin pf UDP state parser recovers IPv6 gateway destination" {
+    const bind_ip = [_]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10 };
+    const peer_ip = [_]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x20 };
+    const actual_ip = [_]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x35 };
+
+    var bind_addr: PfAddr = std.mem.zeroes(PfAddr);
+    var bind_port_be: u16 = 0;
+    var bind_family: u8 = 0;
+    try fillPfLookupAddress(&bind_addr, &bind_port_be, &bind_family, .{ .ip6 = .{ .bytes = bind_ip, .port = 1097, .interface = .none } });
+
+    var peer_addr: PfAddr = std.mem.zeroes(PfAddr);
+    var peer_port_be: u16 = 0;
+    var peer_family: u8 = 0;
+    try fillPfLookupAddress(&peer_addr, &peer_port_be, &peer_family, .{ .ip6 = .{ .bytes = peer_ip, .port = 53000, .interface = .none } });
+
+    var actual_addr: PfAddr = std.mem.zeroes(PfAddr);
+    var actual_port_be: u16 = 0;
+    var actual_family: u8 = 0;
+    try fillPfLookupAddress(&actual_addr, &actual_port_be, &actual_family, .{ .ip6 = .{ .bytes = actual_ip, .port = 53, .interface = .none } });
+
+    var state = [_]u8{0} ** darwin_pfsync_state_size;
+    @memcpy(state[darwin_pfsync_lan_addr_offset..][0..16], std.mem.asBytes(&bind_addr.words));
+    @memcpy(state[darwin_pfsync_ext_gwy_addr_offset..][0..16], std.mem.asBytes(&peer_addr.words));
+    @memcpy(state[darwin_pfsync_gwy_addr_offset..][0..16], std.mem.asBytes(&actual_addr.words));
+    std.mem.writeInt(u16, state[darwin_pfsync_lan_port_offset..][0..2], std.mem.bigToNative(u16, bind_port_be), .native);
+    std.mem.writeInt(u16, state[darwin_pfsync_ext_gwy_port_offset..][0..2], std.mem.bigToNative(u16, peer_port_be), .native);
+    std.mem.writeInt(u16, state[darwin_pfsync_gwy_port_offset..][0..2], std.mem.bigToNative(u16, actual_port_be), .native);
+    state[darwin_pfsync_af_gwy_offset] = actual_family;
+    state[darwin_pfsync_proto_offset] = 17;
+
+    const restored = try pfNatlookDarwinUdpFromStates(
+        &state,
+        bind_addr,
+        std.mem.bigToNative(u16, bind_port_be),
+        peer_addr,
+        std.mem.bigToNative(u16, peer_port_be),
+    );
+    try std.testing.expect(restored.eql(&.{ .ip6 = .{ .bytes = actual_ip, .port = 53, .interface = .none } }));
+}
+
 test "FreeBSD UDP original destination parser reads sockaddr control message" {
     var storage = ipAddressToPosix(.{ .ip4 = .{ .bytes = .{ 203, 0, 113, 10 }, .port = 5353 } });
     var control_buf: [128]u8 align(@alignOf(std.c.cmsghdr)) = undefined;
@@ -1381,6 +1447,17 @@ test "FreeBSD UDP original destination parser reads sockaddr control message" {
 
     const restored = try originalDestinationFromControl(&msg, .freebsd_pf);
     try std.testing.expect(restored.eql(&.{ .ip4 = .{ .bytes = .{ 203, 0, 113, 10 }, .port = 5353 } }));
+}
+
+test "FreeBSD UDP original destination parser reads IPv6 sockaddr control message" {
+    const dst_ip = [_]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x77 };
+    var storage = ipAddressToPosix(.{ .ip6 = .{ .bytes = dst_ip, .port = 5353, .interface = .none } });
+    var control_buf: [160]u8 align(@alignOf(std.c.cmsghdr)) = undefined;
+    const used = writeTestControlMessage(&control_buf, 0, 41, 72, std.mem.asBytes(&storage.in6));
+    var msg = testControlMessage(&control_buf, used);
+
+    const restored = try originalDestinationFromControl(&msg, .freebsd_pf);
+    try std.testing.expect(restored.eql(&.{ .ip6 = .{ .bytes = dst_ip, .port = 5353, .interface = .none } }));
 }
 
 test "OpenBSD UDP original destination parser combines split address and port control messages" {
@@ -1394,6 +1471,34 @@ test "OpenBSD UDP original destination parser combines split address and port co
 
     const restored = try originalDestinationFromControl(&msg, .openbsd_pf);
     try std.testing.expect(restored.eql(&.{ .ip4 = .{ .bytes = .{ 198, 51, 100, 8 }, .port = 5354 } }));
+}
+
+test "OpenBSD UDP original destination parser combines split IPv6 address and port control messages" {
+    var control_buf: [160]u8 align(@alignOf(std.c.cmsghdr)) = undefined;
+    const addr_bytes = [_]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x88 };
+    var port_bytes: [2]u8 = undefined;
+    std.mem.writeInt(u16, &port_bytes, 5355, .big);
+    var pktinfo = [_]u8{0} ** 20;
+    @memcpy(pktinfo[0..16], &addr_bytes);
+    var used = writeTestControlMessage(&control_buf, 0, 41, 46, &pktinfo);
+    used = writeTestControlMessage(&control_buf, used, 41, 64, &port_bytes);
+    var msg = testControlMessage(&control_buf, used);
+
+    const restored = try originalDestinationFromControl(&msg, .openbsd_pf);
+    try std.testing.expect(restored.eql(&.{ .ip6 = .{ .bytes = addr_bytes, .port = 5355, .interface = .none } }));
+}
+
+test "UDP original destination parser rejects truncated control message" {
+    var control_buf: [64]u8 align(@alignOf(std.c.cmsghdr)) = undefined;
+    const header: *std.c.cmsghdr = @ptrCast(@alignCast(&control_buf));
+    header.* = .{
+        .len = @sizeOf(std.c.cmsghdr) + 32,
+        .level = 0,
+        .type = 27,
+    };
+    var msg = testControlMessage(&control_buf, @sizeOf(std.c.cmsghdr) + 4);
+
+    try std.testing.expectError(error.RedirectionOriginalDestinationMissing, originalDestinationFromControl(&msg, .freebsd_pf));
 }
 
 fn writeTestControlMessage(buffer: []align(@alignOf(std.c.cmsghdr)) u8, offset: usize, level: c_int, cmsg_type: c_int, data: []const u8) usize {
