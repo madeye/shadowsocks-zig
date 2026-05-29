@@ -52,8 +52,10 @@ Current state:
   `tun_interface_destination`, and `tun_device_fd_from_path`. The relay layer
   now has an explicit tun dispatch path plus IPv4/IPv6 UDP packet
   parse/synthesis helpers, a Shadowsocks UDP association bridge, and Linux
-  `/dev/net/tun` open/read/write plumbing through libuv readiness waits. Linux
-  tun UDP packets are read from the device, encrypted to the selected
+  `/dev/net/tun` open/read/write plumbing through libuv readiness waits. Unix
+  `tun_device_fd_from_path` now binds a stream socket and receives a TUN file
+  descriptor with `SCM_RIGHTS`, matching shadowsocks-rust's handoff option.
+  Linux tun UDP packets are read from the device, encrypted to the selected
   Shadowsocks server, and server replies are written back as synthesized IP
   packets. The virtual TCP state machine is still remaining work.
 - TCP `ss-server` path for supported ciphers.

@@ -79,6 +79,13 @@ pub const Device = struct {
         };
     }
 
+    pub fn fromFdPath(io: std.Io, path: []const u8) !Device {
+        return switch (builtin.os.tag) {
+            .linux, .macos, .ios, .freebsd, .openbsd => .{ .fd = try receiveTunDeviceFdFromPath(io, path) },
+            else => error.TunLocalFdHandoffUnsupportedPlatform,
+        };
+    }
+
     pub fn close(self: *Device) void {
         closeFd(self.fd);
         self.* = undefined;
@@ -228,6 +235,16 @@ const RuntimeUdpAssociation = struct {
     }
 };
 
+const UnixAddress = extern union {
+    any: std.posix.sockaddr,
+    un: std.posix.sockaddr.un,
+};
+
+const UnixSockaddr = struct {
+    storage: UnixAddress,
+    len: std.posix.socklen_t,
+};
+
 pub fn runLocal(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -248,12 +265,22 @@ pub fn runLocal(
 
     return switch (builtin.os.tag) {
         .linux => {
-            if (local_cfg.tun_device_fd_from_path != null) return error.TunLocalFdHandoffNotImplemented;
-            var device = try Device.open(local_cfg);
+            var device = if (local_cfg.tun_device_fd_from_path) |path|
+                try Device.fromFdPath(io, path)
+            else
+                try Device.open(local_cfg);
             defer device.close();
             return try runDeviceLoop(allocator, io, &device, udp_servers, udp_next, local_cfg, udp_timeout_seconds, udp_max_associations);
         },
-        .macos, .ios, .windows => error.TunLocalDeviceNotImplemented,
+        .macos, .ios, .freebsd, .openbsd => {
+            if (local_cfg.tun_device_fd_from_path) |path| {
+                var device = try Device.fromFdPath(io, path);
+                defer device.close();
+                return try runDeviceLoop(allocator, io, &device, udp_servers, udp_next, local_cfg, udp_timeout_seconds, udp_max_associations);
+            }
+            return error.TunLocalDeviceNotImplemented;
+        },
+        .windows => error.TunLocalDeviceNotImplemented,
         else => error.TunLocalUnsupportedPlatform,
     };
 }
@@ -455,6 +482,197 @@ fn linuxIfReq(name: ?[]const u8) !LinuxIfReq {
         @memcpy(ifreq.ifr_name[0..tun_name.len], tun_name);
     }
     return ifreq;
+}
+
+fn receiveTunDeviceFdFromPath(io: std.Io, path: []const u8) !std.posix.fd_t {
+    deleteUnixSocketPath(io, path);
+    defer deleteUnixSocketPath(io, path);
+
+    const listener = try openUnixStreamListener(path);
+    defer closeFd(listener);
+
+    while (true) {
+        const stream = try acceptUnixStream(listener);
+        defer closeFd(stream);
+
+        return recvFdFromUnixStream(stream) catch |err| switch (err) {
+            error.MissingFileDescriptor => continue,
+            else => |e| return e,
+        };
+    }
+}
+
+fn deleteUnixSocketPath(io: std.Io, path: []const u8) void {
+    if (std.fs.path.isAbsolute(path)) {
+        std.Io.Dir.deleteFileAbsolute(io, path) catch {};
+    } else {
+        std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    }
+}
+
+fn openUnixStreamListener(path: []const u8) !std.posix.socket_t {
+    const fd = try openUnixSocket(std.posix.SOCK.STREAM);
+    errdefer closeFd(fd);
+    try setNonblocking(fd);
+
+    var address = try unixAddress(path);
+    try bindUnixSocket(fd, &address.storage.any, address.len);
+    try listenUnixSocket(fd, 16);
+    return fd;
+}
+
+fn unixAddress(path: []const u8) !UnixSockaddr {
+    var storage: UnixAddress = undefined;
+    storage.un = .{
+        .family = std.posix.AF.UNIX,
+        .path = [_]u8{0} ** @sizeOf(@TypeOf(storage.un.path)),
+    };
+    if (path.len == 0 or path.len >= storage.un.path.len) return error.InvalidTunFdSocketPath;
+    @memcpy(storage.un.path[0..path.len], path);
+    return .{
+        .storage = storage,
+        .len = @intCast(@offsetOf(std.posix.sockaddr.un, "path") + path.len + 1),
+    };
+}
+
+fn openUnixSocket(socket_type: u32) !std.posix.socket_t {
+    while (true) {
+        const rc = std.posix.system.socket(std.posix.AF.UNIX, socket_type, 0);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .INTR => continue,
+            .AFNOSUPPORT => return error.AddressFamilyUnsupported,
+            .MFILE => return error.ProcessFdQuotaExceeded,
+            .NFILE => return error.SystemFdQuotaExceeded,
+            .NOBUFS, .NOMEM => return error.SystemResources,
+            .PROTONOSUPPORT => return error.ProtocolUnsupportedByAddressFamily,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    }
+}
+
+fn bindUnixSocket(fd: std.posix.socket_t, address: *const std.posix.sockaddr, len: std.posix.socklen_t) !void {
+    while (true) {
+        switch (std.posix.errno(std.posix.system.bind(fd, address, len))) {
+            .SUCCESS => return,
+            .INTR => continue,
+            .ACCES => return error.AccessDenied,
+            .ADDRINUSE => return error.AddressInUse,
+            .AFNOSUPPORT => return error.AddressFamilyUnsupported,
+            .NAMETOOLONG => return error.NameTooLong,
+            .NOENT => return error.FileNotFound,
+            .NOTDIR => return error.NotDir,
+            .ROFS => return error.ReadOnlyFileSystem,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    }
+}
+
+fn listenUnixSocket(fd: std.posix.socket_t, backlog: u32) !void {
+    while (true) {
+        switch (std.posix.errno(std.posix.system.listen(fd, backlog))) {
+            .SUCCESS => return,
+            .INTR => continue,
+            .ADDRINUSE => return error.AddressInUse,
+            .BADF => return error.SocketNotConnected,
+            .DESTADDRREQ => return error.DestinationAddressRequired,
+            .INVAL => return error.InvalidArgument,
+            .NOTSOCK => return error.SocketNotConnected,
+            .OPNOTSUPP => return error.OperationNotSupported,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    }
+}
+
+fn acceptUnixStream(listener: std.posix.socket_t) !std.posix.socket_t {
+    while (true) {
+        if (!try libuv.waitReadable(listener, infinite_timeout_ms)) continue;
+        const fd = acceptUnixSocket(listener) catch |err| switch (err) {
+            error.WouldBlock => continue,
+            else => |e| return e,
+        };
+        errdefer closeFd(fd);
+        try setNonblocking(fd);
+        return fd;
+    }
+}
+
+fn acceptUnixSocket(listener: std.posix.socket_t) !std.posix.socket_t {
+    while (true) {
+        const rc = std.posix.system.accept(listener, null, null);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .INTR => continue,
+            .AGAIN => return error.WouldBlock,
+            .BADF => return error.SocketNotConnected,
+            .CONNABORTED => return error.ConnectionAborted,
+            .INVAL => return error.InvalidArgument,
+            .MFILE => return error.ProcessFdQuotaExceeded,
+            .NFILE => return error.SystemFdQuotaExceeded,
+            .NOTSOCK => return error.SocketNotConnected,
+            .OPNOTSUPP => return error.OperationNotSupported,
+            .PROTO => return error.ProtocolFailure,
+            .NOBUFS, .NOMEM => return error.SystemResources,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    }
+}
+
+fn recvFdFromUnixStream(stream: std.posix.socket_t) !std.posix.fd_t {
+    var data: [1024]u8 = undefined;
+    var iov = std.posix.iovec{ .base = &data, .len = data.len };
+    var control_buf: [controlMessageSpace(@sizeOf(std.posix.fd_t))]u8 align(@alignOf(std.c.cmsghdr)) = undefined;
+    var msg = std.posix.msghdr{
+        .name = null,
+        .namelen = 0,
+        .iov = @ptrCast(&iov),
+        .iovlen = 1,
+        .control = &control_buf,
+        .controllen = control_buf.len,
+        .flags = 0,
+    };
+
+    while (true) {
+        if (!try libuv.waitReadable(stream, infinite_timeout_ms)) continue;
+        const rc = std.posix.system.recvmsg(stream, &msg, recvmsgCloexecFlag());
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => {
+                const fd = try fdFromControlMessage(&msg);
+                try setCloseOnExec(fd);
+                try setNonblocking(fd);
+                return fd;
+            },
+            .INTR => continue,
+            .AGAIN => continue,
+            .BADF => return error.SocketNotConnected,
+            .CONNRESET => return error.ConnectionResetByPeer,
+            .INVAL => return error.InvalidArgument,
+            .NOTSOCK => return error.SocketNotConnected,
+            .NOMEM, .NOBUFS => return error.SystemResources,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    }
+}
+
+fn recvmsgCloexecFlag() u32 {
+    const flags = std.posix.MSG;
+    return if (@hasDecl(flags, "CMSG_CLOEXEC")) @field(flags, "CMSG_CLOEXEC") else 0;
+}
+
+fn fdFromControlMessage(msg: *const std.posix.msghdr) !std.posix.fd_t {
+    var current = firstControlMessage(msg);
+    while (current) |cmsg| {
+        if (cmsg.level == std.posix.SOL.SOCKET and cmsg.type == std.posix.SCM.RIGHTS) {
+            const data = controlMessageData(cmsg);
+            if (data.len >= @sizeOf(std.posix.fd_t)) {
+                var fd: std.posix.fd_t = undefined;
+                @memcpy(std.mem.asBytes(&fd), data[0..@sizeOf(std.posix.fd_t)]);
+                return fd;
+            }
+        }
+        current = nextControlMessage(msg, cmsg);
+    }
+    return error.MissingFileDescriptor;
 }
 
 pub fn parseIpPacket(packet: []const u8) !?IpPacket {
@@ -705,6 +923,45 @@ fn readFd(fd: std.posix.fd_t, out: []u8) !usize {
     };
 }
 
+fn setNonblocking(fd: std.posix.fd_t) !void {
+    while (true) {
+        const rc = std.posix.system.fcntl(fd, std.posix.F.GETFL, @as(c_int, 0));
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => {
+                const flags: c_int = @intCast(rc);
+                const nonblock: c_int = @intCast(@as(u32, @bitCast(std.posix.O{ .NONBLOCK = true })));
+                while (true) {
+                    const set_rc = std.posix.system.fcntl(fd, std.posix.F.SETFL, @as(c_int, flags | nonblock));
+                    switch (std.posix.errno(set_rc)) {
+                        .SUCCESS => return,
+                        .INTR => continue,
+                        .BADF => return error.DeviceClosed,
+                        .INVAL => return error.InvalidArgument,
+                        else => |err| return std.posix.unexpectedErrno(err),
+                    }
+                }
+            },
+            .INTR => continue,
+            .BADF => return error.DeviceClosed,
+            .INVAL => return error.InvalidArgument,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    }
+}
+
+fn setCloseOnExec(fd: std.posix.fd_t) !void {
+    while (true) {
+        const rc = std.posix.system.fcntl(fd, std.posix.F.SETFD, @as(c_int, std.posix.FD_CLOEXEC));
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => return,
+            .INTR => continue,
+            .BADF => return error.DeviceClosed,
+            .INVAL => return error.InvalidArgument,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    }
+}
+
 fn writeFd(fd: std.posix.fd_t, bytes: []const u8) !usize {
     if (bytes.len == 0) return 0;
     while (true) {
@@ -734,6 +991,41 @@ fn writeAllFd(fd: std.posix.fd_t, packet: []const u8) !void {
         if (written == 0) return error.DeviceClosed;
         offset += written;
     }
+}
+
+fn firstControlMessage(msg: *const std.posix.msghdr) ?*std.c.cmsghdr {
+    const control = msg.control orelse return null;
+    if (msg.controllen < @sizeOf(std.c.cmsghdr)) return null;
+    return @ptrCast(@alignCast(control));
+}
+
+fn nextControlMessage(msg: *const std.posix.msghdr, cmsg: *std.c.cmsghdr) ?*std.c.cmsghdr {
+    const base_raw: [*]u8 = @ptrCast(msg.control orelse return null);
+    const current_raw: [*]u8 = @ptrCast(cmsg);
+    const current_offset = @intFromPtr(current_raw) - @intFromPtr(base_raw);
+    const next_offset = current_offset + controlMessageAlign(@intCast(cmsg.len));
+    if (next_offset + @sizeOf(std.c.cmsghdr) > msg.controllen) return null;
+    return @ptrCast(@alignCast(base_raw + next_offset));
+}
+
+fn controlMessageData(cmsg: *const std.c.cmsghdr) []const u8 {
+    const raw: [*]const u8 = @ptrCast(cmsg);
+    const offset = controlMessageAlign(@sizeOf(std.c.cmsghdr));
+    const cmsg_len: usize = @intCast(cmsg.len);
+    const len = if (cmsg_len > offset) cmsg_len - offset else 0;
+    return raw[offset..][0..len];
+}
+
+fn controlMessageAlign(len: usize) usize {
+    return std.mem.alignForward(usize, len, @sizeOf(usize));
+}
+
+fn controlMessageSpace(len: usize) usize {
+    return controlMessageAlign(@sizeOf(std.c.cmsghdr)) + controlMessageAlign(len);
+}
+
+fn controlMessageLen(len: usize) usize {
+    return controlMessageAlign(@sizeOf(std.c.cmsghdr)) + len;
 }
 
 fn closeFd(fd: std.posix.fd_t) void {
@@ -870,6 +1162,38 @@ test "tun linux ifreq rejects too long interface name" {
     try std.testing.expectError(error.NameTooLong, linuxIfReq("interface-name-too-long"));
 }
 
+test "tun unix stream receives SCM_RIGHTS file descriptor" {
+    if (comptime builtin.os.tag != .windows and builtin.link_libc) {
+        var pair: [2]std.c.fd_t = undefined;
+        switch (std.posix.errno(std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair))) {
+            .SUCCESS => {},
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+        defer closeFd(pair[0]);
+        defer closeFd(pair[1]);
+
+        const sent_fd = try std.posix.openat(std.posix.AT.FDCWD, "/dev/null", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
+        defer closeFd(sent_fd);
+
+        try sendFdOverUnixStreamForTest(pair[0], sent_fd);
+
+        const received_fd = try recvFdFromUnixStream(pair[1]);
+        defer closeFd(received_fd);
+
+        var buf: [1]u8 = undefined;
+        try std.testing.expectEqual(@as(usize, 0), try readFd(received_fd, &buf));
+    } else return error.SkipZigTest;
+}
+
+test "tun unix socket path rejects empty and oversized paths" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    try std.testing.expectError(error.InvalidTunFdSocketPath, unixAddress(""));
+    var long_path: [linux_if_name_size * 16]u8 = undefined;
+    @memset(&long_path, 'x');
+    try std.testing.expectError(error.InvalidTunFdSocketPath, unixAddress(&long_path));
+}
+
 test "tun UDP selector skips tcp-only servers" {
     var servers = [_]config.Server{ testServerConfig(), testServerConfig() };
     servers[0].mode = .tcp_only;
@@ -887,4 +1211,40 @@ test "tun UDP selector rejects missing UDP-capable servers" {
     var next = std.atomic.Value(usize).init(0);
 
     try std.testing.expectError(error.UnsupportedCipher, selectUdpServer(&servers, &next));
+}
+
+fn sendFdOverUnixStreamForTest(stream: std.posix.socket_t, fd: std.posix.fd_t) !void {
+    var byte = [_]u8{'x'};
+    var iov = std.posix.iovec_const{ .base = &byte, .len = byte.len };
+    var control_buf: [controlMessageSpace(@sizeOf(std.posix.fd_t))]u8 align(@alignOf(std.c.cmsghdr)) = undefined;
+    @memset(&control_buf, 0);
+
+    const cmsg: *std.c.cmsghdr = @ptrCast(@alignCast(&control_buf));
+    cmsg.* = .{
+        .len = @intCast(controlMessageLen(@sizeOf(std.posix.fd_t))),
+        .level = std.posix.SOL.SOCKET,
+        .type = std.posix.SCM.RIGHTS,
+    };
+    const data_offset = controlMessageAlign(@sizeOf(std.c.cmsghdr));
+    @memcpy(control_buf[data_offset..][0..@sizeOf(std.posix.fd_t)], std.mem.asBytes(&fd));
+
+    var msg = std.c.msghdr_const{
+        .name = null,
+        .namelen = 0,
+        .iov = @ptrCast(&iov),
+        .iovlen = 1,
+        .control = &control_buf,
+        .controllen = @intCast(controlMessageLen(@sizeOf(std.posix.fd_t))),
+        .flags = 0,
+    };
+
+    while (true) {
+        const rc = std.c.sendmsg(stream, &msg, 0);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => return,
+            .INTR => continue,
+            .AGAIN => continue,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    }
 }

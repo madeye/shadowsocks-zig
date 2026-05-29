@@ -155,14 +155,17 @@ UDP packet extraction, and UDP response packet synthesis with IP/UDP checksums,
 matching the packet-layer role of shadowsocks-rust's tun service before it
 hands packets to UDP associations or the virtual TCP stack. A tun UDP
 association object turns parsed tun UDP packets into encrypted Shadowsocks UDP
-packets and synthesizes inbound server replies back into IP packets. On Linux,
-the tun module opens `/dev/net/tun`, applies `TUNSETIFF` with `IFF_TUN` and
-`IFF_NO_PI`, and waits on the tun file descriptor through the same libuv
-readiness bridge as TCP/UDP sockets. The Linux runtime loop handles UDP by
-selecting a UDP-capable server, maintaining per-client tun UDP associations,
-forwarding encrypted datagrams to the server, and writing decrypted responses
-back to the tun device. The TCP state machine is not implemented yet, and
-macOS/iOS/Windows device wiring is still separate remaining work.
+packets and synthesizes inbound server replies back into IP packets. Unix
+`tun_device_fd_from_path` binds a stream Unix-domain socket, accepts the first
+client that sends an `SCM_RIGHTS` file descriptor, and uses that descriptor as
+the tun device. On Linux, the tun module can also open `/dev/net/tun`, applies
+`TUNSETIFF` with `IFF_TUN` and `IFF_NO_PI`, and waits on the tun file
+descriptor through the same libuv readiness bridge as TCP/UDP sockets. The
+runtime loop handles UDP by selecting a UDP-capable server, maintaining
+per-client tun UDP associations, forwarding encrypted datagrams to the server,
+and writing decrypted responses back to the tun device. The TCP state machine
+is not implemented yet, and native macOS/iOS/Windows device wiring is still
+separate remaining work.
 
 The first supported cipher set is the SIP004 AEAD group:
 `aes-128-gcm`, `aes-256-gcm`, `chacha20-ietf-poly1305`, and
