@@ -1,8 +1,12 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const config = @import("../config.zig");
+const crypto = @import("../crypto.zig");
+const ss_address = @import("../protocol/address.zig");
 const acl = @import("../security/acl.zig");
+const replay = @import("../security/replay.zig");
 const fake_dns = @import("fake_dns.zig");
+const netio = @import("netio.zig");
 
 const net = std.Io.net;
 const ipv4_header_len = 20;
@@ -46,6 +50,116 @@ pub const UdpPacket = struct {
     source: net.IpAddress,
     destination: net.IpAddress,
     payload: []const u8,
+};
+
+pub const UdpAssociation = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    server_cfg: config.Server,
+    client_addr: net.IpAddress,
+    master_key: [32]u8,
+    client_session_id: u64,
+    client_packet_id: u64 = 0,
+    server_replay: replay.ReplayProtector,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        server_cfg: config.Server,
+        client_addr: net.IpAddress,
+    ) !UdpAssociation {
+        var self = UdpAssociation{
+            .allocator = allocator,
+            .io = io,
+            .server_cfg = server_cfg,
+            .client_addr = client_addr,
+            .master_key = [_]u8{0} ** 32,
+            .client_session_id = try randomNonZeroU64(io),
+            .server_replay = replay.ReplayProtector.init(allocator, 8192),
+        };
+        try crypto.deriveMasterKey(server_cfg.method, server_cfg.password, self.master_key[0..server_cfg.method.keyLen()]);
+        return self;
+    }
+
+    pub fn deinit(self: *UdpAssociation) void {
+        self.server_replay.deinit();
+        self.* = undefined;
+    }
+
+    pub fn encryptPacket(self: *UdpAssociation, packet: UdpPacket) ![]u8 {
+        const target_address = try netio.ipToShadow(packet.destination);
+        const plain = try makeShadowPayload(self.allocator, target_address, packet.payload);
+        defer self.allocator.free(plain);
+        return try self.encryptPlain(plain);
+    }
+
+    pub fn decryptPacket(self: *UdpAssociation, encrypted: []const u8, out: []u8) ![]u8 {
+        const decrypted = try self.decryptServerPacket(encrypted);
+        defer self.allocator.free(decrypted.plain);
+        if (decrypted.timestamp) |timestamp| {
+            if (!validAead2022Timestamp(self.io, timestamp)) return error.InvalidTimestamp;
+            if (decrypted.control.client_session_id != self.client_session_id) return error.InvalidPacket;
+            if (try self.server_replay.checkAndSet(decrypted.replay_key[0..decrypted.replay_key_len])) return error.ReplayedPacket;
+        }
+
+        const parsed = try ss_address.Address.read(decrypted.plain);
+        const payload = decrypted.plain[parsed.used..];
+        const source = try netio.shadowToIp(parsed.address);
+        return try buildUdpPacket(out, source, self.client_addr, payload);
+    }
+
+    fn encryptPlain(self: *UdpAssociation, plain: []const u8) ![]u8 {
+        const method = self.server_cfg.method;
+        return switch (method.category()) {
+            .stream, .aead => try crypto.encryptUdpPacket(self.allocator, self.io, method, self.master_key[0..method.keyLen()], plain),
+            .aead2022 => {
+                self.client_packet_id = self.client_packet_id +% 1;
+                if (self.client_packet_id == 0) {
+                    self.client_session_id = try randomNonZeroU64(self.io);
+                    self.client_packet_id = 1;
+                }
+                return try crypto.encryptAead2022UdpPacket(
+                    self.allocator,
+                    self.io,
+                    method,
+                    self.master_key[0..method.keyLen()],
+                    .client,
+                    .{ .client_session_id = self.client_session_id, .packet_id = self.client_packet_id },
+                    plain,
+                    nowUnixSeconds(self.io),
+                );
+            },
+            else => error.UnsupportedCipher,
+        };
+    }
+
+    fn decryptServerPacket(self: *UdpAssociation, encrypted: []const u8) !DecryptedUdpPacket {
+        const method = self.server_cfg.method;
+        return switch (method.category()) {
+            .stream, .aead => {
+                const plain = try crypto.decryptUdpPacket(self.allocator, method, self.master_key[0..method.keyLen()], encrypted);
+                return .{ .plain = plain };
+            },
+            .aead2022 => {
+                const decoded = try crypto.decryptAead2022UdpPacket(
+                    self.allocator,
+                    method,
+                    self.master_key[0..method.keyLen()],
+                    encrypted,
+                    .server,
+                );
+                errdefer self.allocator.free(decoded.plain);
+                return .{
+                    .plain = decoded.plain,
+                    .control = decoded.control,
+                    .timestamp = decoded.timestamp,
+                    .replay_key = aead2022ReplayKey(decoded.control),
+                    .replay_key_len = 16,
+                };
+            },
+            else => error.UnsupportedCipher,
+        };
+    }
 };
 
 pub fn runLocal(
@@ -274,6 +388,68 @@ fn finalizeChecksum(initial: u32) u16 {
     return ~@as(u16, @intCast(sum & 0xffff));
 }
 
+fn makeShadowPayload(allocator: std.mem.Allocator, address: ss_address.Address, payload: []const u8) ![]u8 {
+    const address_len = address.encodedLen();
+    const out = try allocator.alloc(u8, address_len + payload.len);
+    errdefer allocator.free(out);
+    _ = try address.write(out[0..address_len]);
+    @memcpy(out[address_len..], payload);
+    return out;
+}
+
+const DecryptedUdpPacket = struct {
+    plain: []u8,
+    control: crypto.Aead2022UdpControl = .{},
+    timestamp: ?u64 = null,
+    replay_key: [32]u8 = [_]u8{0} ** 32,
+    replay_key_len: usize = 0,
+};
+
+fn aead2022ReplayKey(control: crypto.Aead2022UdpControl) [32]u8 {
+    var key: [32]u8 = [_]u8{0} ** 32;
+    std.mem.writeInt(u64, key[0..8], if (control.server_session_id != 0) control.server_session_id else control.client_session_id, .big);
+    std.mem.writeInt(u64, key[8..16], control.packet_id, .big);
+    return key;
+}
+
+fn validAead2022Timestamp(io: std.Io, timestamp: u64) bool {
+    const now = nowUnixSeconds(io);
+    return if (now >= timestamp)
+        now - timestamp <= 30
+    else
+        timestamp - now <= 30;
+}
+
+fn nowUnixSeconds(io: std.Io) u64 {
+    return @intCast(std.Io.Clock.real.now(io).toSeconds());
+}
+
+fn randomNonZeroU64(io: std.Io) !u64 {
+    while (true) {
+        var bytes: [8]u8 = undefined;
+        try io.randomSecure(&bytes);
+        const value = std.mem.readInt(u64, &bytes, .big);
+        if (value != 0) return value;
+    }
+}
+
+fn testServerConfig() config.Server {
+    return .{
+        .host = "127.0.0.1",
+        .port = 8388,
+        .password = "test-password",
+        .method = .aes_256_gcm,
+        .mode = .tcp_and_udp,
+        .tcp_weight = config.server_weight_scale,
+        .udp_weight = config.server_weight_scale,
+        .acl_path = null,
+        .plugin = null,
+        .plugin_opts = null,
+        .plugin_args = &.{},
+        .plugin_mode = .tcp_only,
+    };
+}
+
 test "tun parses synthesized IPv4 UDP packet" {
     var buf: [1500]u8 = undefined;
     const source = try net.IpAddress.parse("192.0.2.10", 53000);
@@ -318,4 +494,55 @@ test "tun rejects fragmented IPv4 UDP packet" {
     std.mem.writeInt(u16, buf[10..12], internetChecksum(packet[0..ipv4_header_len]), .big);
 
     try std.testing.expectError(error.UnsupportedTunFragment, parseIpPacket(packet));
+}
+
+test "tun UDP association encrypts outbound packet with target address" {
+    var io = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer io.deinit();
+    const server_cfg = testServerConfig();
+    const client = try net.IpAddress.parse("192.0.2.10", 53000);
+    const target = try net.IpAddress.parse("198.51.100.20", 53);
+    var assoc = try UdpAssociation.init(std.testing.allocator, io.io(), server_cfg, client);
+    defer assoc.deinit();
+
+    const encrypted = try assoc.encryptPacket(.{
+        .version = .ipv4,
+        .source = client,
+        .destination = target,
+        .payload = "query",
+    });
+    defer std.testing.allocator.free(encrypted);
+
+    var master_key: [32]u8 = undefined;
+    try crypto.deriveMasterKey(server_cfg.method, server_cfg.password, master_key[0..server_cfg.method.keyLen()]);
+    const plain = try crypto.decryptUdpPacket(std.testing.allocator, server_cfg.method, master_key[0..server_cfg.method.keyLen()], encrypted);
+    defer std.testing.allocator.free(plain);
+
+    const parsed = try ss_address.Address.read(plain);
+    try std.testing.expectEqual(target, try netio.shadowToIp(parsed.address));
+    try std.testing.expectEqualStrings("query", plain[parsed.used..]);
+}
+
+test "tun UDP association synthesizes inbound response packet" {
+    var io = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer io.deinit();
+    const server_cfg = testServerConfig();
+    const client = try net.IpAddress.parse("192.0.2.10", 53000);
+    const target = try net.IpAddress.parse("198.51.100.20", 53);
+    var assoc = try UdpAssociation.init(std.testing.allocator, io.io(), server_cfg, client);
+    defer assoc.deinit();
+
+    var master_key: [32]u8 = undefined;
+    try crypto.deriveMasterKey(server_cfg.method, server_cfg.password, master_key[0..server_cfg.method.keyLen()]);
+    const plain_response = try makeShadowPayload(std.testing.allocator, try netio.ipToShadow(target), "answer");
+    defer std.testing.allocator.free(plain_response);
+    const encrypted_response = try crypto.encryptUdpPacket(std.testing.allocator, io.io(), server_cfg.method, master_key[0..server_cfg.method.keyLen()], plain_response);
+    defer std.testing.allocator.free(encrypted_response);
+
+    var out: [1500]u8 = undefined;
+    const packet = try assoc.decryptPacket(encrypted_response, &out);
+    const udp_packet = (try parseUdpPacket(packet)).?;
+    try std.testing.expectEqual(target, udp_packet.source);
+    try std.testing.expectEqual(client, udp_packet.destination);
+    try std.testing.expectEqualStrings("answer", udp_packet.payload);
 }

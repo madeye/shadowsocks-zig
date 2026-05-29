@@ -153,9 +153,11 @@ shape. Zig config parsing accepts `tun_interface_name`,
 a dedicated relay module. The module now owns IPv4/IPv6 packet classification,
 UDP packet extraction, and UDP response packet synthesis with IP/UDP checksums,
 matching the packet-layer role of shadowsocks-rust's tun service before it
-hands packets to UDP associations or the virtual TCP stack. The complete
-runtime tun device loop and TCP state machine are not implemented yet, so
-runtime tun startup fails explicitly instead of falling through to a
+hands packets to UDP associations or the virtual TCP stack. A tun UDP
+association object turns parsed tun UDP packets into encrypted Shadowsocks UDP
+packets and synthesizes inbound server replies back into IP packets. The
+complete runtime tun device loop and TCP state machine are not implemented yet,
+so runtime tun startup fails explicitly instead of falling through to a
 listener-based local protocol.
 
 The first supported cipher set is the SIP004 AEAD group:
