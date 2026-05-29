@@ -705,8 +705,7 @@ fn controlMessageData(cmsg: *const std.os.linux.cmsghdr) []const u8 {
 }
 
 fn controlMessageAlign(len: usize) usize {
-    const alignment = @sizeOf(usize);
-    return (len + alignment - 1) & ~(alignment - 1);
+    return std.mem.alignForward(usize, len, @sizeOf(usize));
 }
 
 fn sendUdp(fd: std.posix.socket_t, packet: []const u8, address: net.IpAddress) !usize {
