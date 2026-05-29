@@ -24,6 +24,9 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(exe);
+    for ([_][]const u8{ "ss-local", "ss-server", "ss-manager", "sslocal", "ssserver", "ssmanager" }) |alias| {
+        b.getInstallStep().dependOn(&b.addInstallBinFile(exe.getEmittedBin(), alias).step);
+    }
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());

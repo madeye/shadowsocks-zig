@@ -1,3 +1,4 @@
+pub const cli = @import("cli.zig");
 pub const config = @import("config.zig");
 pub const crypto = @import("crypto.zig");
 pub const manager = @import("manager.zig");
@@ -7,6 +8,7 @@ pub const relay = @import("relay/mod.zig");
 pub const security = @import("security/mod.zig");
 
 test {
+    _ = cli;
     _ = config;
     _ = crypto;
     _ = manager;

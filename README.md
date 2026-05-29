@@ -48,6 +48,10 @@ Current state:
 - TCP `ss-server` path for supported ciphers.
 - UDP `ss-local` SOCKS5 UDP ASSOCIATE path for supported ciphers.
 - UDP `ss-server` path for supported ciphers.
+- Libev-style `ss-local`, `ss-server`, and `ss-manager` executable aliases
+  plus shadowsocks-rust-style `sslocal`, `ssserver`, and `ssmanager` aliases.
+  Alias names infer the process mode while explicit `--local`, `--server`,
+  `--manager`, and `--check` flags remain supported.
 - UDP association timeout and capacity controls via `udp_timeout` and
   `udp_max_associations`, matching shadowsocks-rust's global config names.
 - TCP SIP003 plugin process handling via `plugin`, `plugin_opts`,

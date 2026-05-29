@@ -6,8 +6,12 @@ const usage =
     \\ss-zig --local -c <config.json>
     \\ss-zig --server -c <config.json>
     \\ss-zig --manager -c <config.json>
+    \\ss-local -c <config.json>
+    \\ss-server -c <config.json>
+    \\ss-manager -c <config.json>
     \\
-    \\Initial Zig port. --local runs TCP SOCKS5/SOCKS4/HTTP/DNS/Tunnel/Redir/Fake-DNS ss-local; --server runs TCP/UDP ss-server; --manager runs the manager control API.
+    \\Mode-specific executable names infer --local, --server, or --manager. Explicit mode flags override the executable-name default.
+    \\--local runs TCP SOCKS5/SOCKS4/HTTP/DNS/Tunnel/Redir/Fake-DNS ss-local; --server runs TCP/UDP ss-server; --manager runs the manager control API.
     \\
 ;
 
@@ -20,10 +24,7 @@ pub fn main(init: std.process.Init) !void {
     const executable_path = args.next() orelse "ss-zig";
 
     var config_path: ?[]const u8 = null;
-    var check = false;
-    var local = false;
-    var server = false;
-    var manager = false;
+    var explicit_mode: ?shadowsocks.cli.Mode = null;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-c") or std.mem.eql(u8, arg, "--config")) {
             config_path = args.next() orelse {
@@ -31,13 +32,29 @@ pub fn main(init: std.process.Init) !void {
                 return error.InvalidArgs;
             };
         } else if (std.mem.eql(u8, arg, "--check")) {
-            check = true;
+            if (explicit_mode != null) {
+                try std.Io.File.stderr().writeStreamingAll(io, usage);
+                return error.InvalidArgs;
+            }
+            explicit_mode = .check;
         } else if (std.mem.eql(u8, arg, "--local")) {
-            local = true;
+            if (explicit_mode != null) {
+                try std.Io.File.stderr().writeStreamingAll(io, usage);
+                return error.InvalidArgs;
+            }
+            explicit_mode = .local;
         } else if (std.mem.eql(u8, arg, "--server")) {
-            server = true;
+            if (explicit_mode != null) {
+                try std.Io.File.stderr().writeStreamingAll(io, usage);
+                return error.InvalidArgs;
+            }
+            explicit_mode = .server;
         } else if (std.mem.eql(u8, arg, "--manager")) {
-            manager = true;
+            if (explicit_mode != null) {
+                try std.Io.File.stderr().writeStreamingAll(io, usage);
+                return error.InvalidArgs;
+            }
+            explicit_mode = .manager;
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             try std.Io.File.stdout().writeStreamingAll(io, usage);
             return;
@@ -47,8 +64,11 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    const mode_count: u8 = @intFromBool(check) + @intFromBool(local) + @intFromBool(server) + @intFromBool(manager);
-    if (config_path == null or mode_count != 1) {
+    const mode = explicit_mode orelse shadowsocks.cli.defaultModeFromExecutablePath(executable_path) orelse {
+        try std.Io.File.stderr().writeStreamingAll(io, usage);
+        return error.InvalidArgs;
+    };
+    if (config_path == null) {
         try std.Io.File.stderr().writeStreamingAll(io, usage);
         return error.InvalidArgs;
     }
@@ -56,7 +76,7 @@ pub fn main(init: std.process.Init) !void {
     var cfg = try shadowsocks.config.Config.parseFile(allocator, io, config_path.?);
     defer cfg.deinit();
 
-    if (check) {
+    if (mode == .check) {
         var stdout_buf: [4096]u8 = undefined;
         var stdout_file = std.Io.File.stdout().writerStreaming(io, &stdout_buf);
         const stdout = &stdout_file.interface;
@@ -117,11 +137,11 @@ pub fn main(init: std.process.Init) !void {
             try stdout.print("manager {s} transport={s}\n", .{ manager_cfg.address, @tagName(manager_cfg.transport) });
         }
         try stdout.flush();
-    } else if (local) {
+    } else if (mode == .local) {
         try shadowsocks.relay.tcp.runLocal(allocator, io, init.environ_map, &cfg);
-    } else if (server) {
+    } else if (mode == .server) {
         try shadowsocks.relay.tcp.runServer(allocator, io, init.environ_map, &cfg);
-    } else if (manager) {
+    } else if (mode == .manager) {
         try shadowsocks.manager.run(allocator, io, init.environ_map, executable_path, &cfg);
     }
 }
