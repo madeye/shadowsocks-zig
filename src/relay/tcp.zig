@@ -90,7 +90,7 @@ fn buildLocalServerSet(
     }
 
     for (servers, 0..) |server_cfg, i| {
-        if (!server_cfg.method.isImplemented() or server_cfg.method == .none) return error.UnsupportedCipher;
+        if (!server_cfg.method.isImplemented()) return error.UnsupportedCipher;
         var tcp_server_cfg = server_cfg;
         var udp_server_cfg = server_cfg;
         if (server_cfg.plugin) |plugin_name| {
@@ -144,7 +144,7 @@ fn appendWeightedServer(
 pub fn runServer(allocator: std.mem.Allocator, io: std.Io, env_map: *const std.process.Environ.Map, cfg: *const config.Config) !void {
     if (cfg.servers.len == 0) return error.MissingServer;
     for (cfg.servers) |server_cfg| {
-        if (!server_cfg.method.isImplemented() or server_cfg.method == .none) return error.UnsupportedCipher;
+        if (!server_cfg.method.isImplemented()) return error.UnsupportedCipher;
     }
 
     if (cfg.servers.len == 1) {
@@ -168,7 +168,7 @@ fn runServerInstance(
     udp_timeout_seconds: u64,
     udp_max_associations: ?usize,
 ) !void {
-    if (!server_cfg.method.isImplemented() or server_cfg.method == .none) return error.UnsupportedCipher;
+    if (!server_cfg.method.isImplemented()) return error.UnsupportedCipher;
     var replay_protector = replay.ReplayProtector.init(allocator, 500_000);
     defer replay_protector.deinit();
     var traffic_counter = traffic.Counter{};
@@ -219,7 +219,7 @@ fn runServerInstance(
     }
     if (!server_cfg.mode.enableTcp()) return;
 
-    var server = try netio.listenTcp(tcp_server_cfg.host, tcp_server_cfg.port);
+    var server = try netio.listenTcp(tcp_server_cfg.host, tcp_server_cfg.port, tcp_server_cfg.reuse_port);
     defer server.close();
 
     while (true) {
@@ -310,7 +310,7 @@ fn runLocalInstance(
     }
     if (!local_cfg.mode.enableTcp()) return;
 
-    var listener = try netio.listenTcp(local_cfg.host, local_cfg.port);
+    var listener = try netio.listenTcp(local_cfg.host, local_cfg.port, local_cfg.reuse_port);
     defer listener.close();
 
     while (true) {
@@ -348,7 +348,7 @@ fn runRedirLocal(
     }
     if (!local_cfg.mode.enableTcp()) return;
 
-    var listener = try netio.listenTcpRedir(local_cfg.host, local_cfg.port, local_cfg.tcp_redir);
+    var listener = try netio.listenTcpRedir(local_cfg.host, local_cfg.port, local_cfg.tcp_redir, local_cfg.reuse_port);
     defer listener.close();
 
     while (true) {
@@ -380,7 +380,7 @@ fn runFakeDnsLocal(
     }
     if (!local_cfg.mode.enableTcp()) return;
 
-    var listener = try netio.listenTcp(local_cfg.host, local_cfg.port);
+    var listener = try netio.listenTcp(local_cfg.host, local_cfg.port, local_cfg.reuse_port);
     defer listener.close();
 
     while (true) {
@@ -421,7 +421,7 @@ fn runTunnelLocal(
     }
     if (!local_cfg.mode.enableTcp()) return;
 
-    var listener = try netio.listenTcp(local_cfg.host, local_cfg.port);
+    var listener = try netio.listenTcp(local_cfg.host, local_cfg.port, local_cfg.reuse_port);
     defer listener.close();
 
     while (true) {
@@ -465,7 +465,7 @@ fn runDnsLocal(
     }
     if (!local_cfg.mode.enableTcp()) return;
 
-    var listener = try netio.listenTcp(local_cfg.host, local_cfg.port);
+    var listener = try netio.listenTcp(local_cfg.host, local_cfg.port, local_cfg.reuse_port);
     defer listener.close();
 
     while (true) {

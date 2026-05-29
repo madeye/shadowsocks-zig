@@ -131,27 +131,27 @@ pub const UdpSocket = struct {
     }
 };
 
-pub fn listenTcp(host: []const u8, port: u16) !TcpListener {
+pub fn listenTcp(host: []const u8, port: u16, reuse_port: bool) !TcpListener {
     const address = try net.IpAddress.parse(host, port);
-    return listenTcpAddress(address, false);
+    return listenTcpAddress(address, .{ .reuse_port = reuse_port });
 }
 
-pub fn listenTcpRedir(host: []const u8, port: u16, redir_type: config.RedirType) !TcpListener {
+pub fn listenTcpRedir(host: []const u8, port: u16, redir_type: config.RedirType, reuse_port: bool) !TcpListener {
     const address = try net.IpAddress.parse(host, port);
     return switch (redir_type) {
         .redirect, .tproxy => {
             if (builtin.os.tag != .linux) return error.RedirectionUnsupported;
-            return listenTcpAddress(address, redir_type == .tproxy);
+            return listenTcpAddress(address, .{ .transparent = redir_type == .tproxy, .reuse_port = reuse_port });
         },
         .pf => {
             switch (builtin.os.tag) {
-                .macos, .ios, .freebsd, .openbsd => return listenTcpAddress(address, false),
+                .macos, .ios, .freebsd, .openbsd => return listenTcpAddress(address, .{ .reuse_port = reuse_port }),
                 else => return error.RedirectionUnsupported,
             }
         },
         .ipfw => {
             switch (builtin.os.tag) {
-                .macos, .ios, .freebsd => return listenTcpAddress(address, false),
+                .macos, .ios, .freebsd => return listenTcpAddress(address, .{ .reuse_port = reuse_port }),
                 else => return error.RedirectionUnsupported,
             }
         },
@@ -159,14 +159,20 @@ pub fn listenTcpRedir(host: []const u8, port: u16, redir_type: config.RedirType)
     };
 }
 
-fn listenTcpAddress(address: net.IpAddress, transparent: bool) !TcpListener {
+const TcpListenOptions = struct {
+    transparent: bool = false,
+    reuse_port: bool = false,
+};
+
+fn listenTcpAddress(address: net.IpAddress, options: TcpListenOptions) !TcpListener {
     var storage = ipAddressToPosix(address);
     const fd = try openPosixSocket(posixAddressFamily(address), std.posix.SOCK.STREAM);
     errdefer closeFd(fd);
     try setNonblocking(fd);
-    if (transparent) try setIpTransparent(fd, address);
+    if (options.transparent) try setIpTransparent(fd, address);
     var one: c_int = 1;
     std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, std.mem.asBytes(&one)) catch {};
+    if (options.reuse_port) try setReusePort(fd);
     try bindPosixSocket(fd, &storage.any, posixAddressLen(address));
     try listenPosixSocket(fd, 128);
     return .{ .fd = fd };
@@ -250,12 +256,12 @@ pub fn connectTcpAddress(address: net.IpAddress) !TcpStream {
     return .{ .fd = fd };
 }
 
-pub fn bindUdp(host: []const u8, port: u16) !UdpSocket {
+pub fn bindUdp(host: []const u8, port: u16, reuse_port: bool) !UdpSocket {
     const address = try net.IpAddress.parse(host, port);
-    return try bindUdpAddress(address, .{});
+    return try bindUdpAddress(address, .{ .reuse_port = reuse_port });
 }
 
-pub fn bindUdpRedirListen(host: []const u8, port: u16, redir_type: config.RedirType) !UdpSocket {
+pub fn bindUdpRedirListen(host: []const u8, port: u16, redir_type: config.RedirType, reuse_port: bool) !UdpSocket {
     const address = try net.IpAddress.parse(host, port);
     return switch (redir_type) {
         .tproxy => {
@@ -263,6 +269,7 @@ pub fn bindUdpRedirListen(host: []const u8, port: u16, redir_type: config.RedirT
             var socket = try bindUdpAddress(address, .{
                 .transparent = true,
                 .receive_original_destination = true,
+                .reuse_port = reuse_port,
             });
             socket.redir_type = redir_type;
             return socket;
@@ -272,6 +279,7 @@ pub fn bindUdpRedirListen(host: []const u8, port: u16, redir_type: config.RedirT
                 .macos, .ios => {
                     var socket = try bindUdpAddress(address, .{
                         .disable_fragmentation = true,
+                        .reuse_port = reuse_port,
                     });
                     socket.redir_type = redir_type;
                     return socket;
@@ -281,6 +289,7 @@ pub fn bindUdpRedirListen(host: []const u8, port: u16, redir_type: config.RedirT
                         .bind_any = true,
                         .receive_original_destination = true,
                         .disable_fragmentation = true,
+                        .reuse_port = reuse_port,
                     });
                     socket.redir_type = redir_type;
                     return socket;
@@ -289,6 +298,7 @@ pub fn bindUdpRedirListen(host: []const u8, port: u16, redir_type: config.RedirT
                     var socket = try bindUdpAddress(address, .{
                         .bind_any = true,
                         .receive_original_destination = true,
+                        .reuse_port = reuse_port,
                     });
                     socket.redir_type = redir_type;
                     return socket;
@@ -353,13 +363,18 @@ fn bindUdpAddress(address: net.IpAddress, options: UdpBindOptions) !UdpSocket {
     var one: c_int = 1;
     std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, std.mem.asBytes(&one)) catch {};
     if (options.reuse_port) {
-        std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.REUSEPORT, std.mem.asBytes(&one)) catch |err| switch (err) {
-            error.InvalidProtocolOption => {},
-            else => |e| return e,
-        };
+        try setReusePort(fd);
     }
     try bindPosixSocket(fd, &storage.any, posixAddressLen(address));
     return .{ .fd = fd };
+}
+
+fn setReusePort(fd: std.posix.socket_t) !void {
+    var one: c_int = 1;
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.REUSEPORT, std.mem.asBytes(&one)) catch |err| switch (err) {
+        error.InvalidProtocolOption => {},
+        else => |e| return e,
+    };
 }
 
 pub fn openUdp(address: net.IpAddress) !UdpSocket {

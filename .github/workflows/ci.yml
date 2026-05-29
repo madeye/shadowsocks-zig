@@ -79,13 +79,15 @@ jobs:
           zig-out/bin/ss-zig --check -c tests/aes-gcm-fake-dns.json
           zig-out/bin/ss-zig --check -c tests/aes-gcm-key.json
           zig-out/bin/ss-zig --check -c tests/aes-gcm-no-delay.json
+          zig-out/bin/ss-zig --check -c tests/aes-gcm-reuse-port.json
           zig-out/bin/ss-zig --check -c tests/aes-gcm-string-numbers.json
           zig-out/bin/ss-zig --check -c tests/aead2022-aes128-tcp.json
           zig-out/bin/ss-local --check -c tests/aes-gcm-udp.json
           zig-out/bin/ssserver --check -c tests/aes-gcm-http.json
           zig-out/bin/ssmanager --check -c tests/aes-gcm-manager.json
           zig-out/bin/ss-local --check -s 127.0.0.1 -p 8388 -b 127.0.0.1 -l 1080 -k secret -m aes-256-gcm -u --plugin fake-plugin --plugin-opts mode=test
-          zig-out/bin/ss-server --check -s 0.0.0.0 -p 8388 -k secret -m aes-128-gcm -U --manager-address 127.0.0.1:6001
+          zig-out/bin/ss-server --check -s 0.0.0.0 -p 8388 -k secret -m aes-128-gcm -U --manager-address 127.0.0.1:6001 --reuse-port
+          if zig-out/bin/ss-server --check -s 127.0.0.1 -p 8388 -k secret -m none; then exit 1; fi
           zig-out/bin/ss-redir --check -s 127.0.0.1:8388 -l 1090 -k secret -m aes-256-gcm -u --tcp-redir redirect --udp-redir tproxy
           zig-out/bin/ss-tunnel --check -s 127.0.0.1 -p 8388 -l 5353 -k secret -m aes-256-gcm -u -L 8.8.8.8:53
 

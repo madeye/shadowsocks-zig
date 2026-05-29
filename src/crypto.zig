@@ -11,13 +11,11 @@ pub const CryptoError = error{
 } || std.mem.Allocator.Error || std.Io.RandomSecureError;
 
 pub const CipherCategory = enum {
-    none,
     aead,
     aead2022,
 };
 
 pub const CipherKind = enum {
-    none,
     aes_128_gcm,
     aes_256_gcm,
     chacha20_ietf_poly1305,
@@ -36,7 +34,6 @@ pub const CipherKind = enum {
 
     pub fn name(self: CipherKind) []const u8 {
         return switch (self) {
-            .none => "none",
             .aes_128_gcm => "aes-128-gcm",
             .aes_256_gcm => "aes-256-gcm",
             .chacha20_ietf_poly1305 => "chacha20-ietf-poly1305",
@@ -49,7 +46,6 @@ pub const CipherKind = enum {
 
     pub fn category(self: CipherKind) CipherCategory {
         return switch (self) {
-            .none => .none,
             .aes_128_gcm, .aes_256_gcm, .chacha20_ietf_poly1305, .xchacha20_ietf_poly1305 => .aead,
             .aead2022_blake3_aes_128_gcm,
             .aead2022_blake3_aes_256_gcm,
@@ -60,7 +56,6 @@ pub const CipherKind = enum {
 
     pub fn keyLen(self: CipherKind) usize {
         return switch (self) {
-            .none => 0,
             .aes_128_gcm, .aead2022_blake3_aes_128_gcm => 16,
             .aes_256_gcm,
             .chacha20_ietf_poly1305,
@@ -79,7 +74,6 @@ pub const CipherKind = enum {
             .aead2022_blake3_aes_256_gcm,
             .aead2022_blake3_chacha20_poly1305,
             => 32,
-            else => 0,
         };
     }
 
@@ -95,7 +89,6 @@ pub const CipherKind = enum {
             .aead2022_blake3_aes_256_gcm,
             .aead2022_blake3_chacha20_poly1305,
             => 12,
-            else => 0,
         };
     }
 
@@ -109,12 +102,13 @@ pub const CipherKind = enum {
             .aead2022_blake3_aes_256_gcm,
             .aead2022_blake3_chacha20_poly1305,
             => 16,
-            else => 0,
         };
     }
 
     pub fn isImplemented(self: CipherKind) bool {
-        return self == .none or self.category() == .aead or self.category() == .aead2022;
+        return switch (self.category()) {
+            .aead, .aead2022 => true,
+        };
     }
 };
 
@@ -583,7 +577,6 @@ pub const TcpCipher = union(enum) {
         return switch (method.category()) {
             .aead => .{ .aead = try AeadCipher.init(method, master_key, salt) },
             .aead2022 => .{ .aead2022 = try Aead2022TcpCipher.init(method, master_key, salt) },
-            else => error.UnsupportedCipher,
         };
     }
 
@@ -915,6 +908,7 @@ test "cipher names parse rust/libev strings" {
     try std.testing.expectEqual(CipherCategory.aead, CipherKind.xchacha20_ietf_poly1305.category());
     try std.testing.expectEqual(@as(usize, 32), CipherKind.xchacha20_ietf_poly1305.saltLen());
     try std.testing.expectEqual(@as(usize, 24), CipherKind.xchacha20_ietf_poly1305.nonceLen());
+    try std.testing.expectError(error.InvalidCipher, CipherKind.parse("none"));
     try std.testing.expectError(error.InvalidCipher, CipherKind.parse("aes-256-cfb"));
     try std.testing.expectError(error.InvalidCipher, CipherKind.parse("aes-256-ctr"));
     try std.testing.expectError(error.InvalidCipher, CipherKind.parse("rc4-md5"));

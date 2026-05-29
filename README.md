@@ -82,7 +82,8 @@ Current state:
 - Network handling owns nonblocking POSIX TCP/UDP sockets and uses libuv
   readiness polling through a narrow C ABI wrapper. `std.Io` is still used for
   process/file/random/DNS helper APIs. Libev-style `no_delay` / `--no-delay`
-  enables TCP_NODELAY on accepted and outgoing TCP sockets.
+  enables TCP_NODELAY on accepted and outgoing TCP sockets, and `reuse_port` /
+  `--reuse-port` enables SO_REUSEPORT on TCP/UDP bind sockets.
 - Server-side AEAD salt replay rejection with a shared rotating replay filter.
 - SOCKS5 username/password authentication for TCP local mode via
   `socks5_auth_config_path`.

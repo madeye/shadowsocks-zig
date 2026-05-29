@@ -13,7 +13,7 @@ const usage =
     \\ss-tunnel -s <server> -p <port> -k <password> -m <method> -l <local_port> -L <target:port>
     \\
     \\Mode-specific executable names infer --local, --server, or --manager. Explicit mode flags override the executable-name default.
-    \\Common libev flags are accepted: -s, -p, -b, -l, -k, -m, -t, -u, -U, -L, --plugin, --plugin-opts, --acl, and --manager-address.
+    \\Common libev flags are accepted: -s, -p, -b, -l, -k, -m, -t, -u, -U, -L, --plugin, --plugin-opts, --acl, --manager-address, --no-delay, and --reuse-port.
     \\--local runs TCP SOCKS5/SOCKS4/HTTP/DNS/Tunnel/Redir/Fake-DNS ss-local; --server runs TCP/UDP ss-server; --manager runs the manager control API.
     \\
 ;
@@ -107,7 +107,9 @@ pub fn main(init: std.process.Init) !void {
             _ = args.next() orelse return invalidArgs(io);
         } else if (std.mem.eql(u8, arg, "--no-delay")) {
             overrides.no_delay = true;
-        } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "-6") or std.mem.eql(u8, arg, "--fast-open") or std.mem.eql(u8, arg, "--reuse-port")) {
+        } else if (std.mem.eql(u8, arg, "--reuse-port")) {
+            overrides.reuse_port = true;
+        } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "-6") or std.mem.eql(u8, arg, "--fast-open")) {
             continue;
         } else {
             try std.Io.File.stderr().writeStreamingAll(io, usage);
