@@ -96,6 +96,27 @@ pub const RedirType = enum {
     }
 };
 
+pub const TcpBufferConfig = struct {
+    incoming_sndbuf: ?u32 = null,
+    incoming_rcvbuf: ?u32 = null,
+    outgoing_sndbuf: ?u32 = null,
+    outgoing_rcvbuf: ?u32 = null,
+
+    pub fn hasAny(self: TcpBufferConfig) bool {
+        return self.incoming_sndbuf != null or
+            self.incoming_rcvbuf != null or
+            self.outgoing_sndbuf != null or
+            self.outgoing_rcvbuf != null;
+    }
+
+    pub fn merge(self: *TcpBufferConfig, other: TcpBufferConfig) void {
+        if (other.incoming_sndbuf) |value| self.incoming_sndbuf = value;
+        if (other.incoming_rcvbuf) |value| self.incoming_rcvbuf = value;
+        if (other.outgoing_sndbuf) |value| self.outgoing_sndbuf = value;
+        if (other.outgoing_rcvbuf) |value| self.outgoing_rcvbuf = value;
+    }
+};
+
 pub const Server = struct {
     host: []const u8,
     port: u16,
@@ -106,6 +127,7 @@ pub const Server = struct {
     no_delay: bool,
     reuse_port: bool,
     ipv6_first: bool,
+    tcp_buffers: TcpBufferConfig,
     tcp_weight: u16,
     udp_weight: u16,
     acl_path: ?[]const u8,
@@ -125,6 +147,7 @@ pub const Local = struct {
     no_delay: bool,
     reuse_port: bool,
     ipv6_first: bool,
+    tcp_buffers: TcpBufferConfig,
     forward_host: ?[]const u8,
     forward_port: ?u16,
     local_dns_host: ?[]const u8,
@@ -177,6 +200,7 @@ pub const Overrides = struct {
     no_delay: ?bool = null,
     reuse_port: ?bool = null,
     ipv6_first: ?bool = null,
+    tcp_buffers: TcpBufferConfig = .{},
 
     pub fn hasAny(self: Overrides) bool {
         return self.server_host != null or
@@ -199,7 +223,8 @@ pub const Overrides = struct {
             self.plugin_opts != null or
             self.no_delay != null or
             self.reuse_port != null or
-            self.ipv6_first != null;
+            self.ipv6_first != null or
+            self.tcp_buffers.hasAny();
     }
 };
 
@@ -270,6 +295,7 @@ pub const Config = struct {
             .no_delay = overrides.no_delay orelse false,
             .reuse_port = overrides.reuse_port orelse false,
             .ipv6_first = overrides.ipv6_first orelse false,
+            .tcp_buffers = overrides.tcp_buffers,
             .tcp_weight = server_weight_scale,
             .udp_weight = server_weight_scale,
             .acl_path = try dupeOptionalSlice(a, overrides.acl_path),
@@ -290,6 +316,7 @@ pub const Config = struct {
             .no_delay = overrides.no_delay orelse false,
             .reuse_port = overrides.reuse_port orelse false,
             .ipv6_first = overrides.ipv6_first orelse false,
+            .tcp_buffers = overrides.tcp_buffers,
             .forward_host = try dupeOptionalSlice(a, forward_host),
             .forward_port = forward_port,
             .local_dns_host = null,
@@ -332,6 +359,7 @@ pub const Config = struct {
             if (overrides.no_delay) |no_delay| server.no_delay = no_delay;
             if (overrides.reuse_port) |reuse_port| server.reuse_port = reuse_port;
             if (overrides.ipv6_first) |ipv6_first| server.ipv6_first = ipv6_first;
+            server.tcp_buffers.merge(overrides.tcp_buffers);
         }
         for (self.locals) |*local| {
             if (overrides.local_host) |host| local.host = try a.dupe(u8, host);
@@ -346,6 +374,7 @@ pub const Config = struct {
             if (overrides.no_delay) |no_delay| local.no_delay = no_delay;
             if (overrides.reuse_port) |reuse_port| local.reuse_port = reuse_port;
             if (overrides.ipv6_first) |ipv6_first| local.ipv6_first = ipv6_first;
+            local.tcp_buffers.merge(overrides.tcp_buffers);
             if ((local.protocol == .tunnel or local.protocol == .dns) and (local.forward_host == null or local.forward_port == null)) {
                 return error.MissingForwardAddress;
             }
@@ -443,6 +472,7 @@ pub const Config = struct {
             .no_delay = asBool(object.get("no_delay") orelse root.get("no_delay")) orelse false,
             .reuse_port = asBool(object.get("reuse_port") orelse root.get("reuse_port")) orelse false,
             .ipv6_first = asBool(object.get("ipv6_first") orelse root.get("ipv6_first")) orelse false,
+            .tcp_buffers = try parseTcpBufferConfig(object, root),
             .tcp_weight = try parseWeight(object.get("tcp_weight") orelse root.get("tcp_weight")),
             .udp_weight = try parseWeight(object.get("udp_weight") orelse root.get("udp_weight")),
             .acl_path = try dupOptionalNonEmptyString(allocator, object.get("acl") orelse root.get("acl")),
@@ -473,6 +503,7 @@ pub const Config = struct {
             .no_delay = asBool(object.get("no_delay") orelse root.get("no_delay")) orelse false,
             .reuse_port = asBool(object.get("reuse_port") orelse root.get("reuse_port")) orelse false,
             .ipv6_first = asBool(object.get("ipv6_first") orelse root.get("ipv6_first")) orelse false,
+            .tcp_buffers = try parseTcpBufferConfig(object, root),
             .forward_host = forward_host,
             .forward_port = forward_port,
             .local_dns_host = local_dns_host,
@@ -633,6 +664,22 @@ fn parsePortWithDefault(value: ?std.json.Value, default: u16) ?u16 {
     const port = asU64(value) orelse return default;
     if (port == 0 or port > std.math.maxInt(u16)) return null;
     return @intCast(port);
+}
+
+fn parseTcpBufferConfig(object: std.json.ObjectMap, root: std.json.ObjectMap) ConfigError!TcpBufferConfig {
+    return .{
+        .incoming_sndbuf = try parseTcpBufferSize(object.get("tcp_incoming_sndbuf") orelse root.get("tcp_incoming_sndbuf")),
+        .incoming_rcvbuf = try parseTcpBufferSize(object.get("tcp_incoming_rcvbuf") orelse root.get("tcp_incoming_rcvbuf")),
+        .outgoing_sndbuf = try parseTcpBufferSize(object.get("tcp_outgoing_sndbuf") orelse root.get("tcp_outgoing_sndbuf")),
+        .outgoing_rcvbuf = try parseTcpBufferSize(object.get("tcp_outgoing_rcvbuf") orelse root.get("tcp_outgoing_rcvbuf")),
+    };
+}
+
+fn parseTcpBufferSize(value: ?std.json.Value) ConfigError!?u32 {
+    if (value == null) return null;
+    const raw = asU64(value) orelse return error.InvalidConfig;
+    if (raw == 0 or raw > std.math.maxInt(c_int)) return error.InvalidConfig;
+    return @intCast(raw);
 }
 
 fn parseManager(allocator: std.mem.Allocator, root: std.json.ObjectMap) ConfigError!?Manager {
@@ -816,6 +863,10 @@ test "parse classic shadowsocks config" {
         \\  "no_delay": true,
         \\  "reuse_port": true,
         \\  "ipv6_first": true,
+        \\  "tcp_incoming_sndbuf": 32768,
+        \\  "tcp_incoming_rcvbuf": "32769",
+        \\  "tcp_outgoing_sndbuf": 32770,
+        \\  "tcp_outgoing_rcvbuf": "32771",
         \\  "udp_timeout": 10,
         \\  "udp_max_associations": 32
         \\}
@@ -845,6 +896,14 @@ test "parse classic shadowsocks config" {
     try std.testing.expect(cfg.locals[0].reuse_port);
     try std.testing.expect(cfg.servers[0].ipv6_first);
     try std.testing.expect(cfg.locals[0].ipv6_first);
+    try std.testing.expectEqual(@as(?u32, 32768), cfg.servers[0].tcp_buffers.incoming_sndbuf);
+    try std.testing.expectEqual(@as(?u32, 32769), cfg.servers[0].tcp_buffers.incoming_rcvbuf);
+    try std.testing.expectEqual(@as(?u32, 32770), cfg.servers[0].tcp_buffers.outgoing_sndbuf);
+    try std.testing.expectEqual(@as(?u32, 32771), cfg.servers[0].tcp_buffers.outgoing_rcvbuf);
+    try std.testing.expectEqual(@as(?u32, 32768), cfg.locals[0].tcp_buffers.incoming_sndbuf);
+    try std.testing.expectEqual(@as(?u32, 32769), cfg.locals[0].tcp_buffers.incoming_rcvbuf);
+    try std.testing.expectEqual(@as(?u32, 32770), cfg.locals[0].tcp_buffers.outgoing_sndbuf);
+    try std.testing.expectEqual(@as(?u32, 32771), cfg.locals[0].tcp_buffers.outgoing_rcvbuf);
     try std.testing.expectEqualStrings("127.0.0.1", cfg.manager.?.host);
     try std.testing.expectEqual(@as(u16, 6001), cfg.manager.?.port);
     try std.testing.expectEqual(ManagerTransport.ip, cfg.manager.?.transport);
@@ -866,6 +925,12 @@ test "build config from libev-style CLI overrides" {
         .no_delay = true,
         .reuse_port = true,
         .ipv6_first = true,
+        .tcp_buffers = .{
+            .incoming_sndbuf = 40960,
+            .incoming_rcvbuf = 40961,
+            .outgoing_sndbuf = 40962,
+            .outgoing_rcvbuf = 40963,
+        },
     });
     defer cfg.deinit();
 
@@ -882,6 +947,10 @@ test "build config from libev-style CLI overrides" {
     try std.testing.expect(cfg.locals[0].reuse_port);
     try std.testing.expect(cfg.servers[0].ipv6_first);
     try std.testing.expect(cfg.locals[0].ipv6_first);
+    try std.testing.expectEqual(@as(?u32, 40960), cfg.servers[0].tcp_buffers.incoming_sndbuf);
+    try std.testing.expectEqual(@as(?u32, 40961), cfg.locals[0].tcp_buffers.incoming_rcvbuf);
+    try std.testing.expectEqual(@as(?u32, 40962), cfg.servers[0].tcp_buffers.outgoing_sndbuf);
+    try std.testing.expectEqual(@as(?u32, 40963), cfg.locals[0].tcp_buffers.outgoing_rcvbuf);
     try std.testing.expectEqualStrings("fake-plugin", cfg.servers[0].plugin.?);
     try std.testing.expectEqualStrings("obfs=tls", cfg.servers[0].plugin_opts.?);
 }
@@ -925,6 +994,12 @@ test "apply CLI overrides to parsed config" {
         .no_delay = true,
         .reuse_port = true,
         .ipv6_first = true,
+        .tcp_buffers = .{
+            .incoming_sndbuf = 49152,
+            .incoming_rcvbuf = 49153,
+            .outgoing_sndbuf = 49154,
+            .outgoing_rcvbuf = 49155,
+        },
     });
 
     try std.testing.expectEqualStrings("203.0.113.7", cfg.servers[0].host);
@@ -941,6 +1016,10 @@ test "apply CLI overrides to parsed config" {
     try std.testing.expect(cfg.locals[0].reuse_port);
     try std.testing.expect(cfg.servers[0].ipv6_first);
     try std.testing.expect(cfg.locals[0].ipv6_first);
+    try std.testing.expectEqual(@as(?u32, 49152), cfg.servers[0].tcp_buffers.incoming_sndbuf);
+    try std.testing.expectEqual(@as(?u32, 49153), cfg.locals[0].tcp_buffers.incoming_rcvbuf);
+    try std.testing.expectEqual(@as(?u32, 49154), cfg.servers[0].tcp_buffers.outgoing_sndbuf);
+    try std.testing.expectEqual(@as(?u32, 49155), cfg.locals[0].tcp_buffers.outgoing_rcvbuf);
 }
 
 test "apply CLI password override clears configured raw key" {

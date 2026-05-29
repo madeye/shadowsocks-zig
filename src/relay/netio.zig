@@ -53,6 +53,14 @@ pub const TcpStream = struct {
         setTcpNoDelay(self.fd);
     }
 
+    pub fn applyIncomingBuffers(self: *const TcpStream, buffers: config.TcpBufferConfig) !void {
+        try applyTcpIncomingBuffers(self.fd, buffers);
+    }
+
+    pub fn applyOutgoingBuffers(self: *const TcpStream, buffers: config.TcpBufferConfig) !void {
+        try applyTcpOutgoingBuffers(self.fd, buffers);
+    }
+
     pub fn read(self: *TcpStream, out: []u8) !usize {
         while (true) {
             if (!try libuv.waitReadable(self.fd, infinite_timeout_ms)) continue;
@@ -80,6 +88,21 @@ pub const TcpStream = struct {
 pub fn setTcpNoDelay(fd: std.posix.socket_t) void {
     var one: c_int = 1;
     std.posix.setsockopt(fd, std.posix.IPPROTO.TCP, 1, std.mem.asBytes(&one)) catch {};
+}
+
+pub fn applyTcpIncomingBuffers(fd: std.posix.socket_t, buffers: config.TcpBufferConfig) !void {
+    if (buffers.incoming_sndbuf) |size| try setSocketBuffer(fd, std.posix.SO.SNDBUF, size);
+    if (buffers.incoming_rcvbuf) |size| try setSocketBuffer(fd, std.posix.SO.RCVBUF, size);
+}
+
+pub fn applyTcpOutgoingBuffers(fd: std.posix.socket_t, buffers: config.TcpBufferConfig) !void {
+    if (buffers.outgoing_sndbuf) |size| try setSocketBuffer(fd, std.posix.SO.SNDBUF, size);
+    if (buffers.outgoing_rcvbuf) |size| try setSocketBuffer(fd, std.posix.SO.RCVBUF, size);
+}
+
+fn setSocketBuffer(fd: std.posix.socket_t, option: u32, size: u32) !void {
+    const value: c_int = @intCast(size);
+    try std.posix.setsockopt(fd, std.posix.SOL.SOCKET, option, std.mem.asBytes(&value));
 }
 
 pub const UdpSocket = struct {
@@ -246,10 +269,20 @@ pub fn connectTcpPreferred(host: []const u8, port: u16, ipv6_first: bool) !TcpSt
     return try connectTcpAddress(address);
 }
 
+pub fn connectTcpPreferredWithBuffers(host: []const u8, port: u16, ipv6_first: bool, buffers: config.TcpBufferConfig) !TcpStream {
+    const address = try resolveIpPreferred(host, port, ipv6_first);
+    return try connectTcpAddressWithBuffers(address, buffers);
+}
+
 pub fn connectTcpAddress(address: net.IpAddress) !TcpStream {
+    return try connectTcpAddressWithBuffers(address, .{});
+}
+
+pub fn connectTcpAddressWithBuffers(address: net.IpAddress, buffers: config.TcpBufferConfig) !TcpStream {
     var storage = ipAddressToPosix(address);
     const fd = try openPosixSocket(posixAddressFamily(address), std.posix.SOCK.STREAM);
     errdefer closeFd(fd);
+    try applyTcpOutgoingBuffers(fd, buffers);
     try setNonblocking(fd);
     connectPosixSocket(fd, &storage.any, posixAddressLen(address)) catch |err| switch (err) {
         error.WouldBlock => {

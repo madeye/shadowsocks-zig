@@ -58,8 +58,9 @@ Current state:
   and local protocol while explicit `--local`, `--server`, `--manager`, and
   `--check` flags remain supported. Common libev flags such as `-s`, `-p`,
   `-b`, `-l`, `-k`, `-m`, `-u`, `-U`, `-L`, `--plugin`, `--plugin-opts`,
-  `--key`, `--acl`, `-6`, and `--manager-address` can build or override config
-  at startup.
+  `--key`, `--acl`, `-6`, `--manager-address`, and
+  `--tcp-{incoming,outgoing}-{sndbuf,rcvbuf}` can build or override config at
+  startup.
 - UDP association timeout and capacity controls via `udp_timeout` and
   `udp_max_associations`, matching shadowsocks-rust's global config names.
 - TCP SIP003 plugin process handling via `plugin`, `plugin_opts`,
@@ -87,6 +88,8 @@ Current state:
   `--reuse-port` enables SO_REUSEPORT on TCP/UDP bind sockets.
   Libev-style `ipv6_first` / `-6` makes domain resolution prefer IPv6 results
   for configured server endpoints and direct outbound target connects.
+  Libev-style TCP buffer sizes set SO_SNDBUF/SO_RCVBUF on accepted incoming TCP
+  sockets and outbound TCP connect sockets.
 - Server-side AEAD salt replay rejection with a shared rotating replay filter.
 - SOCKS5 username/password authentication for TCP local mode via
   `socks5_auth_config_path`.

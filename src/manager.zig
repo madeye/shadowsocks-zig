@@ -21,6 +21,7 @@ const Entry = struct {
     no_delay: bool = false,
     reuse_port: bool = false,
     ipv6_first: bool = false,
+    tcp_buffers: config.TcpBufferConfig = .{},
     acl_path: ?[]const u8 = null,
     plugin: ?[]const u8 = null,
     plugin_opts: ?[]const u8 = null,
@@ -222,6 +223,12 @@ pub const Manager = struct {
             .no_delay = jsonBool(object.get("no_delay")) orelse false,
             .reuse_port = jsonBool(object.get("reuse_port")) orelse false,
             .ipv6_first = jsonBool(object.get("ipv6_first")) orelse false,
+            .tcp_buffers = .{
+                .incoming_sndbuf = jsonU32(object.get("tcp_incoming_sndbuf")),
+                .incoming_rcvbuf = jsonU32(object.get("tcp_incoming_rcvbuf")),
+                .outgoing_sndbuf = jsonU32(object.get("tcp_outgoing_sndbuf")),
+                .outgoing_rcvbuf = jsonU32(object.get("tcp_outgoing_rcvbuf")),
+            },
             .plugin = plugin_name,
             .plugin_opts = plugin_opts,
             .plugin_args = plugin_args,
@@ -347,6 +354,7 @@ pub const Manager = struct {
             if (entry.ipv6_first) {
                 try out.appendSlice(self.allocator, ",\"ipv6_first\":true");
             }
+            try appendTcpBuffersCompact(&out, self.allocator, entry.tcp_buffers);
             try out.appendSlice(self.allocator, "},");
         }
         if (self.entries.items.len > 0) {
@@ -406,6 +414,7 @@ fn entryFromServer(allocator: std.mem.Allocator, server_cfg: config.Server) !Ent
         .no_delay = server_cfg.no_delay,
         .reuse_port = server_cfg.reuse_port,
         .ipv6_first = server_cfg.ipv6_first,
+        .tcp_buffers = server_cfg.tcp_buffers,
         .acl_path = acl_path,
         .plugin = plugin_name,
         .plugin_opts = plugin_opts,
@@ -461,6 +470,18 @@ fn jsonBool(value: ?std.json.Value) ?bool {
         .bool => |b| b,
         else => null,
     };
+}
+
+fn jsonU32(value: ?std.json.Value) ?u32 {
+    const v = value orelse return null;
+    const raw: u64 = switch (v) {
+        .integer => |i| if (i >= 0) @intCast(i) else return null,
+        .float => |f| if (f >= 0 and f <= std.math.maxInt(u32)) @intFromFloat(f) else return null,
+        .string => |s| std.fmt.parseInt(u32, s, 10) catch return null,
+        else => return null,
+    };
+    if (raw == 0 or raw > std.math.maxInt(c_int)) return null;
+    return @intCast(raw);
 }
 
 fn jsonU64(value: std.json.Value) ?u64 {
@@ -562,6 +583,44 @@ fn appendJsonStringArray(out: *std.ArrayList(u8), allocator: std.mem.Allocator, 
     try out.append(allocator, ']');
 }
 
+fn appendTcpBuffersCompact(out: *std.ArrayList(u8), allocator: std.mem.Allocator, buffers: config.TcpBufferConfig) !void {
+    if (buffers.incoming_sndbuf) |value| {
+        try out.appendSlice(allocator, ",\"tcp_incoming_sndbuf\":");
+        try appendInt(out, allocator, value);
+    }
+    if (buffers.incoming_rcvbuf) |value| {
+        try out.appendSlice(allocator, ",\"tcp_incoming_rcvbuf\":");
+        try appendInt(out, allocator, value);
+    }
+    if (buffers.outgoing_sndbuf) |value| {
+        try out.appendSlice(allocator, ",\"tcp_outgoing_sndbuf\":");
+        try appendInt(out, allocator, value);
+    }
+    if (buffers.outgoing_rcvbuf) |value| {
+        try out.appendSlice(allocator, ",\"tcp_outgoing_rcvbuf\":");
+        try appendInt(out, allocator, value);
+    }
+}
+
+fn appendTcpBuffersPretty(out: *std.ArrayList(u8), allocator: std.mem.Allocator, buffers: config.TcpBufferConfig) !void {
+    if (buffers.incoming_sndbuf) |value| {
+        try out.appendSlice(allocator, ",\n  \"tcp_incoming_sndbuf\":");
+        try appendInt(out, allocator, value);
+    }
+    if (buffers.incoming_rcvbuf) |value| {
+        try out.appendSlice(allocator, ",\n  \"tcp_incoming_rcvbuf\":");
+        try appendInt(out, allocator, value);
+    }
+    if (buffers.outgoing_sndbuf) |value| {
+        try out.appendSlice(allocator, ",\n  \"tcp_outgoing_sndbuf\":");
+        try appendInt(out, allocator, value);
+    }
+    if (buffers.outgoing_rcvbuf) |value| {
+        try out.appendSlice(allocator, ",\n  \"tcp_outgoing_rcvbuf\":");
+        try appendInt(out, allocator, value);
+    }
+}
+
 fn portAvailable(entry: Entry) !bool {
     if (entry.mode.enableTcp()) {
         if (!try netio.canBindTcp(entry.host, entry.port)) return false;
@@ -599,6 +658,7 @@ fn renderServerConfig(allocator: std.mem.Allocator, entry: Entry, manager_addres
     if (entry.ipv6_first) {
         try out.appendSlice(allocator, ",\n  \"ipv6_first\":true");
     }
+    try appendTcpBuffersPretty(&out, allocator, entry.tcp_buffers);
     try out.appendSlice(allocator, ",\n  \"manager_address\":");
     try appendJsonString(&out, allocator, manager_address.address);
     if (entry.acl_path) |acl_path| {
@@ -785,6 +845,10 @@ test "manager preserves configured raw keys" {
         \\  "no_delay": true,
         \\  "reuse_port": true,
         \\  "ipv6_first": true,
+        \\  "tcp_incoming_sndbuf": 57344,
+        \\  "tcp_incoming_rcvbuf": 57345,
+        \\  "tcp_outgoing_sndbuf": 57346,
+        \\  "tcp_outgoing_rcvbuf": 57347,
         \\  "manager_address": "127.0.0.1:6001"
         \\}
     );
@@ -799,6 +863,10 @@ test "manager preserves configured raw keys" {
     try std.testing.expect(std.mem.indexOf(u8, list, "\"no_delay\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, list, "\"reuse_port\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, list, "\"ipv6_first\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, list, "\"tcp_incoming_sndbuf\":57344") != null);
+    try std.testing.expect(std.mem.indexOf(u8, list, "\"tcp_incoming_rcvbuf\":57345") != null);
+    try std.testing.expect(std.mem.indexOf(u8, list, "\"tcp_outgoing_sndbuf\":57346") != null);
+    try std.testing.expect(std.mem.indexOf(u8, list, "\"tcp_outgoing_rcvbuf\":57347") != null);
 
     const rendered = try renderServerConfig(std.testing.allocator, mgr.entries.items[0], cfg.manager.?);
     defer std.testing.allocator.free(rendered);
@@ -807,4 +875,8 @@ test "manager preserves configured raw keys" {
     try std.testing.expect(std.mem.indexOf(u8, rendered, "\"no_delay\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "\"reuse_port\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "\"ipv6_first\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "\"tcp_incoming_sndbuf\":57344") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "\"tcp_incoming_rcvbuf\":57345") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "\"tcp_outgoing_sndbuf\":57346") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "\"tcp_outgoing_rcvbuf\":57347") != null);
 }

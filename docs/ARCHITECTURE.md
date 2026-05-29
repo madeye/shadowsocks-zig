@@ -89,6 +89,12 @@ endpoints in local mode and when resolving outbound domain targets in server
 mode. Local configs use it for direct-bypass target connects and local DNS
 forwards.
 
+Libev TCP buffer size options are also stored on both server and local listener
+configs. `tcp_incoming_sndbuf` / `tcp_incoming_rcvbuf` are applied to accepted
+TCP sockets from clients. `tcp_outgoing_sndbuf` / `tcp_outgoing_rcvbuf` are
+applied before outbound TCP connects to configured Shadowsocks servers or
+direct target sockets.
+
 SOCKS5 username/password authentication follows shadowsocks-rust's
 `socks5_auth_config_path` convention. The file is parsed as:
 

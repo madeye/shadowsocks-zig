@@ -1,0 +1,13 @@
+{
+  "server": "127.0.0.1",
+  "server_port": 8425,
+  "local_address": "127.0.0.1",
+  "local_port": 1125,
+  "password": "secret",
+  "method": "aes-128-gcm",
+  "mode": "tcp_only",
+  "tcp_incoming_sndbuf": 32768,
+  "tcp_incoming_rcvbuf": 32769,
+  "tcp_outgoing_sndbuf": 32770,
+  "tcp_outgoing_rcvbuf": 32771
+}

@@ -13,7 +13,7 @@ const usage =
     \\ss-tunnel -s <server> -p <port> -k <password> -m <method> -l <local_port> -L <target:port>
     \\
     \\Mode-specific executable names infer --local, --server, or --manager. Explicit mode flags override the executable-name default.
-    \\Common libev flags are accepted: -s, -p, -b, -l, -k, -m, -t, -u, -U, -L, -6, --key, --plugin, --plugin-opts, --acl, --manager-address, --no-delay, and --reuse-port.
+    \\Common libev flags are accepted: -s, -p, -b, -l, -k, -m, -t, -u, -U, -L, -6, --key, --plugin, --plugin-opts, --acl, --manager-address, --no-delay, --reuse-port, and TCP buffer size flags.
     \\--local runs TCP SOCKS5/SOCKS4/HTTP/DNS/Tunnel/Redir/Fake-DNS ss-local; --server runs TCP/UDP ss-server; --manager runs the manager control API.
     \\
 ;
@@ -113,6 +113,14 @@ pub fn main(init: std.process.Init) !void {
             overrides.reuse_port = true;
         } else if (std.mem.eql(u8, arg, "-6")) {
             overrides.ipv6_first = true;
+        } else if (std.mem.eql(u8, arg, "--tcp-incoming-sndbuf")) {
+            overrides.tcp_buffers.incoming_sndbuf = try parseTcpBufferArg(args.next() orelse return invalidArgs(io));
+        } else if (std.mem.eql(u8, arg, "--tcp-incoming-rcvbuf")) {
+            overrides.tcp_buffers.incoming_rcvbuf = try parseTcpBufferArg(args.next() orelse return invalidArgs(io));
+        } else if (std.mem.eql(u8, arg, "--tcp-outgoing-sndbuf")) {
+            overrides.tcp_buffers.outgoing_sndbuf = try parseTcpBufferArg(args.next() orelse return invalidArgs(io));
+        } else if (std.mem.eql(u8, arg, "--tcp-outgoing-rcvbuf")) {
+            overrides.tcp_buffers.outgoing_rcvbuf = try parseTcpBufferArg(args.next() orelse return invalidArgs(io));
         } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--fast-open")) {
             continue;
         } else {
@@ -180,6 +188,7 @@ pub fn main(init: std.process.Init) !void {
             if (server_cfg.ipv6_first) {
                 try stdout.print("  ipv6_first=true\n", .{});
             }
+            try printTcpBuffers(stdout, "server", server_cfg.tcp_buffers);
         }
         for (cfg.locals) |local_cfg| {
             try stdout.print("local {s}:{d} protocol={s} mode={s}", .{ local_cfg.host, local_cfg.port, local_cfg.protocol.name(), @tagName(local_cfg.mode) });
@@ -207,6 +216,7 @@ pub fn main(init: std.process.Init) !void {
             if (local_cfg.ipv6_first) {
                 try stdout.print(" ipv6_first=true", .{});
             }
+            try printTcpBuffersInline(stdout, local_cfg.tcp_buffers);
             try stdout.print("\n", .{});
         }
         if (cfg.manager) |manager_cfg| {
@@ -237,6 +247,12 @@ fn parseU64Arg(text: []const u8) !u64 {
     return std.fmt.parseInt(u64, text, 10) catch return error.InvalidArgs;
 }
 
+fn parseTcpBufferArg(text: []const u8) !u32 {
+    const raw = try parseU64Arg(text);
+    if (raw == 0 or raw > std.math.maxInt(c_int)) return error.InvalidArgs;
+    return @intCast(raw);
+}
+
 fn applyHostPortArg(text: []const u8, host: *?[]const u8, port: *?u16) !void {
     if (text.len == 0) return error.InvalidArgs;
     if (text[0] == '[') {
@@ -263,4 +279,21 @@ fn applyHostPortArg(text: []const u8, host: *?[]const u8, port: *?u16) !void {
     }
 
     host.* = text;
+}
+
+fn printTcpBuffers(stdout: anytype, prefix: []const u8, buffers: shadowsocks.config.TcpBufferConfig) !void {
+    if (!buffers.hasAny()) return;
+    try stdout.print("  {s}_tcp_buffers", .{prefix});
+    if (buffers.incoming_sndbuf) |value| try stdout.print(" incoming_sndbuf={d}", .{value});
+    if (buffers.incoming_rcvbuf) |value| try stdout.print(" incoming_rcvbuf={d}", .{value});
+    if (buffers.outgoing_sndbuf) |value| try stdout.print(" outgoing_sndbuf={d}", .{value});
+    if (buffers.outgoing_rcvbuf) |value| try stdout.print(" outgoing_rcvbuf={d}", .{value});
+    try stdout.print("\n", .{});
+}
+
+fn printTcpBuffersInline(stdout: anytype, buffers: shadowsocks.config.TcpBufferConfig) !void {
+    if (buffers.incoming_sndbuf) |value| try stdout.print(" tcp_incoming_sndbuf={d}", .{value});
+    if (buffers.incoming_rcvbuf) |value| try stdout.print(" tcp_incoming_rcvbuf={d}", .{value});
+    if (buffers.outgoing_sndbuf) |value| try stdout.print(" tcp_outgoing_sndbuf={d}", .{value});
+    if (buffers.outgoing_rcvbuf) |value| try stdout.print(" tcp_outgoing_rcvbuf={d}", .{value});
 }
