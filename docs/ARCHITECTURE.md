@@ -146,33 +146,6 @@ the same key names as shadowsocks-rust, including
 `shadowsocks_fakedns_meta`, `shadowsocks_fakedns_name2ip_*`, and
 `shadowsocks_fakedns_ip2name_*`.
 
-Tun local configuration follows shadowsocks-rust's `protocol = "tun"` local
-shape. Zig config parsing accepts `tun_interface_name`,
-`tun_interface_address`, `tun_interface_destination`, and the Unix
-`tun_device_fd_from_path` handoff path, and local mode dispatches tun locals to
-a dedicated relay module. The module now owns IPv4/IPv6 packet classification,
-UDP/TCP packet extraction, and UDP/TCP packet synthesis with IP and transport
-checksums, matching the packet-layer role of shadowsocks-rust's tun service
-before it hands packets to UDP associations or the virtual TCP stack. A tun UDP
-association object turns parsed tun UDP packets into encrypted Shadowsocks UDP
-packets and synthesizes inbound server replies back into IP packets. Unix
-`tun_device_fd_from_path` binds a stream Unix-domain socket, accepts the first
-client that sends an `SCM_RIGHTS` file descriptor, and uses that descriptor as
-the tun device. On Linux, the tun module can also open `/dev/net/tun`, applies
-`TUNSETIFF` with `IFF_TUN` and `IFF_NO_PI`, and waits on the tun file
-descriptor through the same libuv readiness bridge as TCP/UDP sockets. The
-runtime loop handles UDP by selecting a UDP-capable server, maintaining
-per-client-and-destination tun UDP associations, applying fake-DNS rewrites and
-outbound ACL blocking, forwarding encrypted datagrams to the server, and
-writing decrypted responses back to the tun device. ACL-bypassed UDP targets
-are sent directly through a separate UDP socket association and direct responses
-are synthesized back into TUN IP packets. When a fake-DNS address is rewritten
-to a domain before encryption or direct forwarding, response packets preserve
-the fake IP as their source address for the local application. TCP packets are
-validated and synthesized with correct IPv4/IPv6 pseudo-header checksums; the
-virtual TCP stream state machine and native macOS/iOS/Windows device wiring are
-still separate remaining work.
-
 The first supported cipher set is the SIP004 AEAD group:
 `aes-128-gcm`, `aes-256-gcm`, `chacha20-ietf-poly1305`, and
 `xchacha20-ietf-poly1305`. Legacy `aes-128-cfb`, `aes-256-cfb`, `rc4-md5`, and

@@ -89,11 +89,7 @@ pub fn main(init: std.process.Init) !void {
             }
         }
         for (cfg.locals) |local_cfg| {
-            if (local_cfg.protocol == .tun) {
-                try stdout.print("local protocol={s} mode={s}", .{ local_cfg.protocol.name(), @tagName(local_cfg.mode) });
-            } else {
-                try stdout.print("local {s}:{d} protocol={s} mode={s}", .{ local_cfg.host, local_cfg.port, local_cfg.protocol.name(), @tagName(local_cfg.mode) });
-            }
+            try stdout.print("local {s}:{d} protocol={s} mode={s}", .{ local_cfg.host, local_cfg.port, local_cfg.protocol.name(), @tagName(local_cfg.mode) });
             if (local_cfg.protocol == .redir) {
                 try stdout.print(" tcp_redir={s} udp_redir={s}", .{ local_cfg.tcp_redir.name(), local_cfg.udp_redir.name() });
             }
@@ -111,18 +107,6 @@ pub fn main(init: std.process.Init) !void {
             }
             if (local_cfg.fake_dns_database_path) |path| {
                 try stdout.print(" fake_dns_database_path={s}", .{path});
-            }
-            if (local_cfg.tun_interface_name) |name| {
-                try stdout.print(" tun_interface_name={s}", .{name});
-            }
-            if (local_cfg.tun_interface_address) |address| {
-                try stdout.print(" tun_interface_address={s}", .{address});
-            }
-            if (local_cfg.tun_interface_destination) |destination| {
-                try stdout.print(" tun_interface_destination={s}", .{destination});
-            }
-            if (local_cfg.tun_device_fd_from_path) |path| {
-                try stdout.print(" tun_device_fd_from_path={s}", .{path});
             }
             if (local_cfg.acl_path) |acl_path| {
                 try stdout.print(" acl={s}", .{acl_path});

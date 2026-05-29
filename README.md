@@ -47,21 +47,6 @@ Current state:
   mapped fake IP targets back to domains in SOCKS/HTTP local paths. Default
   builds keep the existing JSON fallback; `zig build -Drocksdb=true` enables
   the shadowsocks-rust-compatible RocksDB/BSON key layout.
-- Tun local config compatibility via `protocol = "tun"` with
-  `tun_interface_name`, `tun_interface_address`,
-  `tun_interface_destination`, and `tun_device_fd_from_path`. The relay layer
-  now has an explicit tun dispatch path plus IPv4/IPv6 UDP and TCP packet
-  parse/synthesis helpers, a Shadowsocks UDP association bridge, and Linux
-  `/dev/net/tun` open/read/write plumbing through libuv readiness waits. Unix
-  `tun_device_fd_from_path` now binds a stream socket and receives a TUN file
-  descriptor with `SCM_RIGHTS`, matching shadowsocks-rust's handoff option.
-  Linux tun UDP packets are read from the device, encrypted to the selected
-  Shadowsocks server, and server replies are written back as synthesized IP
-  packets. TUN UDP target handling now applies fake-DNS rewrites and outbound
-  ACL blocking before encryption, and ACL-bypassed UDP targets are sent
-  directly with synthesized responses written back to the TUN device. TCP
-  packets are parsed and synthesized with checksum validation; the virtual TCP
-  stream state machine is still remaining work.
 - TCP `ss-server` path for supported ciphers.
 - UDP `ss-local` SOCKS5 UDP ASSOCIATE path for supported ciphers.
 - UDP `ss-server` path for supported ciphers.
@@ -272,6 +257,4 @@ Latest libuv/Zig 0.16 smoke checks:
 Remaining high-level port work:
 
 - Remaining specialized local protocol work from shadowsocks-rust/libev:
-  virtual TCP forwarding for tun local mode, macOS/iOS/Windows tun device
-  wiring, plus full BSD/macOS pf/ipfw integration tests with kernel rules and
-  tun interfaces.
+  full BSD/macOS pf/ipfw integration tests with kernel rules.

@@ -12,7 +12,6 @@ const replay = @import("../security/replay.zig");
 const fake_dns = @import("fake_dns.zig");
 const netio = @import("netio.zig");
 const traffic = @import("traffic.zig");
-const tun = @import("tun.zig");
 const udp = @import("udp.zig");
 
 pub const max_aead_packet_size: usize = 0x3fff;
@@ -297,7 +296,6 @@ fn runLocalInstance(
         .redir => return try runRedirLocal(allocator, io, selector, local_cfg, udp_timeout_seconds, udp_max_associations, acl_ptr),
         .dns => return try runDnsLocal(allocator, io, selector, local_cfg, udp_timeout_seconds, udp_max_associations, acl_ptr),
         .fake_dns => return try runFakeDnsLocal(allocator, io, local_cfg, fake_dns_manager orelse return error.MissingFakeDnsManager),
-        .tun => return try tun.runLocal(allocator, io, selector.tcp_servers, selector.udp_servers, &selector.tcp_next, &selector.udp_next, local_cfg, udp_timeout_seconds, udp_max_associations, acl_ptr, fake_dns_manager),
         .socks, .http => {},
     }
 
