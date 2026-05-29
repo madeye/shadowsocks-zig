@@ -10,6 +10,8 @@ Current state:
   per-address ports, raw base64 `key` credentials, and manager-style
   `port_password` multi-port entries. Numeric fields such as ports, timeouts,
   and weights accept JSON numbers or libev-style numeric strings.
+  shadowsocks-rust-style `disabled = true` entries in extended `servers` and
+  `locals` arrays are skipped before per-entry validation.
 - Multiple `servers` in server mode and multiple `locals` in local mode are
   started from shadowsocks-rust-style extended JSON configs. Local mode honors
   per-server `tcp_weight` and `udp_weight` values with separate TCP and UDP

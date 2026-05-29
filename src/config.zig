@@ -422,10 +422,16 @@ pub const Config = struct {
         var servers = std.ArrayList(Server).empty;
         if (root.get("servers")) |svrs| {
             if (svrs != .array) return error.InvalidConfig;
-            for (svrs.array.items) |item| try servers.append(a, try parseServer(a, item, root));
+            for (svrs.array.items) |item| {
+                if (try disabledConfigEntry(item)) continue;
+                try servers.append(a, try parseServer(a, item, root));
+            }
         } else if (root.get("shadowsocks")) |svrs| {
             if (svrs != .array) return error.InvalidConfig;
-            for (svrs.array.items) |item| try servers.append(a, try parseServer(a, item, root));
+            for (svrs.array.items) |item| {
+                if (try disabledConfigEntry(item)) continue;
+                try servers.append(a, try parseServer(a, item, root));
+            }
         } else if (root.get("port_password")) |_| {
             try appendPortPasswordServers(a, &servers, root);
         } else if (root.get("server")) |server_value| {
@@ -437,14 +443,19 @@ pub const Config = struct {
         } else {
             try servers.append(a, try parseServer(a, value, root));
         }
+        if (servers.items.len == 0) return error.MissingServer;
 
         var locals = std.ArrayList(Local).empty;
         if (root.get("locals")) |items| {
             if (items != .array) return error.InvalidConfig;
-            for (items.array.items) |item| try locals.append(a, try parseLocal(a, io, item, root));
+            for (items.array.items) |item| {
+                if (try disabledConfigEntry(item)) continue;
+                try locals.append(a, try parseLocal(a, io, item, root));
+            }
         } else {
             try locals.append(a, try parseLocal(a, io, value, root));
         }
+        if (locals.items.len == 0) return error.MissingLocal;
 
         return .{
             .allocator = allocator,
@@ -549,6 +560,12 @@ fn parseLocalMode(protocol: LocalProtocol, value: ?[]const u8) Mode {
         .dns, .fake_dns => .tcp_and_udp,
         else => .tcp_only,
     };
+}
+
+fn disabledConfigEntry(value: std.json.Value) ConfigError!bool {
+    if (value != .object) return false;
+    const disabled = value.object.get("disabled") orelse return false;
+    return asBool(disabled) orelse return error.InvalidConfig;
 }
 
 fn appendClassicServerArray(
@@ -1310,10 +1327,12 @@ test "parse shadowsocks-rust extended servers/locals config" {
     var cfg = try Config.parseSlice(std.testing.allocator,
         \\{
         \\  "servers": [
+        \\    {"disabled": true, "server": "disabled.example", "server_port": 1, "method": "none"},
         \\    {"server": "one.example", "server_port": 8388, "password": "one", "method": "aes-128-gcm", "tcp_weight": 0.25, "udp_weight": 0},
         \\    {"server": "two.example", "server_port": 8389, "password": "two", "method": "chacha20-ietf-poly1305", "tcp_weight": 1.0, "udp_weight": 0.5}
         \\  ],
         \\  "locals": [
+        \\    {"disabled": true, "protocol": "tun"},
         \\    {
         \\      "local_address": "127.0.0.1",
         \\      "local_port": 1081,
@@ -1341,6 +1360,40 @@ test "parse shadowsocks-rust extended servers/locals config" {
     try std.testing.expectEqual(@as(usize, 1), cfg.locals[0].socks5_users.len);
     try std.testing.expectEqual(LocalProtocol.socks, cfg.locals[0].protocol);
     try std.testing.expectEqualStrings("alice", cfg.locals[0].socks5_users[0].user_name);
+}
+
+test "parse rejects extended config with no enabled servers or locals" {
+    try std.testing.expectError(error.MissingServer, Config.parseSlice(std.testing.allocator,
+        \\{
+        \\  "servers": [
+        \\    {"disabled": true, "server": "disabled.example", "server_port": 8388}
+        \\  ],
+        \\  "locals": [
+        \\    {"local_address": "127.0.0.1", "local_port": 1081}
+        \\  ]
+        \\}
+    ));
+
+    try std.testing.expectError(error.MissingLocal, Config.parseSlice(std.testing.allocator,
+        \\{
+        \\  "servers": [
+        \\    {"server": "127.0.0.1", "server_port": 8388, "password": "secret", "method": "aes-128-gcm"}
+        \\  ],
+        \\  "locals": [
+        \\    {"disabled": true, "protocol": "tun"}
+        \\  ]
+        \\}
+    ));
+}
+
+test "parse rejects non-boolean disabled flag" {
+    try std.testing.expectError(error.InvalidConfig, Config.parseSlice(std.testing.allocator,
+        \\{
+        \\  "servers": [
+        \\    {"disabled": "yes", "server": "127.0.0.1", "server_port": 8388, "password": "secret", "method": "aes-128-gcm"}
+        \\  ]
+        \\}
+    ));
 }
 
 test "parse tunnel local forward address" {

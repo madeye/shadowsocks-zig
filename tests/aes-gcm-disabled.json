@@ -1,0 +1,28 @@
+{
+  "servers": [
+    {
+      "disabled": true,
+      "server": "disabled.example",
+      "server_port": 1,
+      "method": "none"
+    },
+    {
+      "server": "127.0.0.1",
+      "server_port": 8427,
+      "password": "secret",
+      "method": "aes-128-gcm"
+    }
+  ],
+  "locals": [
+    {
+      "disabled": true,
+      "protocol": "tun"
+    },
+    {
+      "local_address": "127.0.0.1",
+      "local_port": 1127,
+      "protocol": "socks",
+      "mode": "tcp_only"
+    }
+  ]
+}

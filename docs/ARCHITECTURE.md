@@ -14,7 +14,9 @@ Reference points used for this foundation:
 Current Zig modules:
 
 - `config`: JSON config parsing for classic single-server and extended
-  multi-server shapes.
+  multi-server shapes. Extended `servers` and `locals` entries with
+  `disabled = true` are skipped before per-entry validation, matching
+  shadowsocks-rust's disabled-entry semantics.
 - `crypto`: cipher metadata, OpenSSL-compatible MD5 `EVP_BytesToKey`, HKDF-SHA1
   subkey derivation, `std.crypto` AEAD operations, v1 AEAD chunk framing, and
   AEAD-2022 TCP/UDP framing.
