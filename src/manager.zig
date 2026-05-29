@@ -15,6 +15,7 @@ const Entry = struct {
     host: []const u8,
     port: u16,
     password: []const u8,
+    key: ?[]const u8 = null,
     method: []const u8,
     mode: config.Mode,
     acl_path: ?[]const u8 = null,
@@ -181,9 +182,12 @@ pub const Manager = struct {
         if (value.value != .object) return error.InvalidCommand;
         const object = value.value.object;
         const port = parsePort(object.get("server_port") orelse return error.InvalidCommand) orelse return error.InvalidCommand;
+        const key = try dupeOptionalJsonString(self.allocator, object.get("key"));
+        errdefer if (key) |value_string| self.allocator.free(value_string);
+
         const password = if (object.get("password")) |password_value|
             try dupeJsonString(self.allocator, password_value)
-        else if (require_password)
+        else if (require_password and key == null)
             return error.InvalidCommand
         else
             try self.allocator.dupe(u8, "");
@@ -209,6 +213,7 @@ pub const Manager = struct {
             .host = host,
             .port = port,
             .password = password,
+            .key = key,
             .method = method,
             .mode = config.Mode.parse(jsonString(object.get("mode")) orelse @tagName(self.default_mode)),
             .plugin = plugin_name,
@@ -321,6 +326,10 @@ pub const Manager = struct {
             try appendInt(&out, self.allocator, entry.port);
             try out.appendSlice(self.allocator, "\",\"password\":");
             try appendJsonString(&out, self.allocator, entry.password);
+            if (entry.key) |key| {
+                try out.appendSlice(self.allocator, ",\"key\":");
+                try appendJsonString(&out, self.allocator, key);
+            }
             try out.appendSlice(self.allocator, ",\"method\":");
             try appendJsonString(&out, self.allocator, entry.method);
             try out.appendSlice(self.allocator, "},");
@@ -360,6 +369,8 @@ fn entryFromServer(allocator: std.mem.Allocator, server_cfg: config.Server) !Ent
     errdefer allocator.free(host);
     const password = try allocator.dupe(u8, server_cfg.password);
     errdefer allocator.free(password);
+    const key = try dupeOptionalBytes(allocator, server_cfg.key);
+    errdefer if (key) |value| allocator.free(value);
     const method = try allocator.dupe(u8, server_cfg.method.name());
     errdefer allocator.free(method);
     const acl_path = try dupeOptionalBytes(allocator, server_cfg.acl_path);
@@ -374,6 +385,7 @@ fn entryFromServer(allocator: std.mem.Allocator, server_cfg: config.Server) !Ent
         .host = host,
         .port = server_cfg.port,
         .password = password,
+        .key = key,
         .method = method,
         .mode = server_cfg.mode,
         .acl_path = acl_path,
@@ -388,6 +400,7 @@ fn entryFromServer(allocator: std.mem.Allocator, server_cfg: config.Server) !Ent
 fn freeEntryFields(allocator: std.mem.Allocator, entry: Entry) void {
     allocator.free(entry.host);
     allocator.free(entry.password);
+    if (entry.key) |value| allocator.free(value);
     allocator.free(entry.method);
     if (entry.acl_path) |value| allocator.free(value);
     if (entry.plugin) |value| allocator.free(value);
@@ -543,6 +556,10 @@ fn renderServerConfig(allocator: std.mem.Allocator, entry: Entry, manager_addres
     try appendInt(&out, allocator, entry.port);
     try out.appendSlice(allocator, ",\n  \"password\":");
     try appendJsonString(&out, allocator, entry.password);
+    if (entry.key) |key| {
+        try out.appendSlice(allocator, ",\n  \"key\":");
+        try appendJsonString(&out, allocator, key);
+    }
     try out.appendSlice(allocator, ",\n  \"method\":");
     try appendJsonString(&out, allocator, entry.method);
     try out.appendSlice(allocator, ",\n  \"mode\":");
@@ -721,4 +738,29 @@ test "manager command table supports add list stat ping remove" {
     const after = (try mgr.processCommand("list")).?;
     defer std.testing.allocator.free(after);
     try std.testing.expect(std.mem.indexOf(u8, after, "\"server_port\":\"8390\"") == null);
+}
+
+test "manager preserves configured raw keys" {
+    var cfg = try config.Config.parseSlice(std.testing.allocator,
+        \\{
+        \\  "server": "127.0.0.1",
+        \\  "server_port": 8388,
+        \\  "key": "AQIDBAUGBwgJCgsMDQ4PEA==",
+        \\  "method": "aes-128-gcm",
+        \\  "manager_address": "127.0.0.1:6001"
+        \\}
+    );
+    defer cfg.deinit();
+
+    var mgr = try Manager.init(std.testing.allocator, &cfg);
+    defer mgr.deinit();
+
+    const list = (try mgr.processCommand("list")).?;
+    defer std.testing.allocator.free(list);
+    try std.testing.expect(std.mem.indexOf(u8, list, "\"key\":\"AQIDBAUGBwgJCgsMDQ4PEA==\"") != null);
+
+    const rendered = try renderServerConfig(std.testing.allocator, mgr.entries.items[0], cfg.manager.?);
+    defer std.testing.allocator.free(rendered);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "\"password\":\"\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "\"key\":\"AQIDBAUGBwgJCgsMDQ4PEA==\"") != null);
 }

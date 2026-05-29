@@ -1,0 +1,8 @@
+{
+  "server": "127.0.0.1",
+  "server_port": 8420,
+  "local_address": "127.0.0.1",
+  "local_port": 1120,
+  "key": "AQIDBAUGBwgJCgsMDQ4PEA==",
+  "method": "aes-128-gcm"
+}

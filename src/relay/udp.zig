@@ -91,7 +91,7 @@ pub fn runLocal(
                 .timeout_ns = timeoutNs(udp_timeout_seconds),
                 .last_seen_ns = .init(nowNs(io)),
             };
-            try crypto.deriveMasterKey(server_cfg.method, server_cfg.password, assoc.master_key[0..server_cfg.method.keyLen()]);
+            try crypto.deriveMasterKeyWithRawKey(server_cfg.method, server_cfg.password, server_cfg.key, assoc.master_key[0..server_cfg.method.keyLen()]);
             try associations.put(key, assoc);
 
             const thread = try std.Thread.spawn(.{}, localResponseLoop, .{assoc});
@@ -163,7 +163,7 @@ pub fn runLocalRedir(
                 .timeout_ns = timeoutNs(udp_timeout_seconds),
                 .last_seen_ns = .init(nowNs(io)),
             };
-            try crypto.deriveMasterKey(server_cfg.method, server_cfg.password, assoc.master_key[0..server_cfg.method.keyLen()]);
+            try crypto.deriveMasterKeyWithRawKey(server_cfg.method, server_cfg.password, server_cfg.key, assoc.master_key[0..server_cfg.method.keyLen()]);
             try associations.put(key, assoc);
 
             const thread = try std.Thread.spawn(.{}, localResponseLoop, .{assoc});
@@ -251,7 +251,7 @@ pub fn runLocalTunnel(
                 .timeout_ns = timeoutNs(udp_timeout_seconds),
                 .last_seen_ns = .init(nowNs(io)),
             };
-            try crypto.deriveMasterKey(server_cfg.method, server_cfg.password, assoc.master_key[0..server_cfg.method.keyLen()]);
+            try crypto.deriveMasterKeyWithRawKey(server_cfg.method, server_cfg.password, server_cfg.key, assoc.master_key[0..server_cfg.method.keyLen()]);
             try associations.put(key, assoc);
 
             const thread = try std.Thread.spawn(.{}, localResponseLoop, .{assoc});
@@ -326,7 +326,7 @@ pub fn runDnsLocal(
                 .timeout_ns = timeoutNs(udp_timeout_seconds),
                 .last_seen_ns = .init(nowNs(io)),
             };
-            try crypto.deriveMasterKey(server_cfg.method, server_cfg.password, assoc.master_key[0..server_cfg.method.keyLen()]);
+            try crypto.deriveMasterKeyWithRawKey(server_cfg.method, server_cfg.password, server_cfg.key, assoc.master_key[0..server_cfg.method.keyLen()]);
             try associations.put(key, assoc);
 
             const thread = try std.Thread.spawn(.{}, localResponseLoop, .{assoc});
@@ -416,7 +416,7 @@ pub fn runServer(
     defer socket.close();
 
     var master_key: [32]u8 = undefined;
-    try crypto.deriveMasterKey(server_cfg.method, server_cfg.password, master_key[0..server_cfg.method.keyLen()]);
+    try crypto.deriveMasterKeyWithRawKey(server_cfg.method, server_cfg.password, server_cfg.key, master_key[0..server_cfg.method.keyLen()]);
 
     var target_to_client = std.AutoHashMap(u64, ServerAssociation).init(allocator);
     defer target_to_client.deinit();

@@ -7,7 +7,8 @@ Current state:
 
 - Classic and shadowsocks-rust-style extended JSON config parsing. Classic
   libev configs support a single `server`, a `server` array with optional
-  per-address ports, and manager-style `port_password` multi-port entries.
+  per-address ports, raw base64 `key` credentials, and manager-style
+  `port_password` multi-port entries.
 - Multiple `servers` in server mode and multiple `locals` in local mode are
   started from shadowsocks-rust-style extended JSON configs. Local mode honors
   per-server `tcp_weight` and `udp_weight` values with separate TCP and UDP

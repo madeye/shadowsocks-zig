@@ -149,9 +149,20 @@ pub fn deriveMasterKey(method: CipherKind, password: []const u8, out: []u8) Cryp
     try decodeBase64Key(encoded, out);
 }
 
+pub fn deriveMasterKeyWithRawKey(method: CipherKind, password: []const u8, raw_key: ?[]const u8, out: []u8) CryptoError!void {
+    if (raw_key) |key| {
+        if (out.len != method.keyLen()) return error.InvalidKeyLength;
+        try decodeBase64KeyPrefix(key, out);
+        return;
+    }
+    try deriveMasterKey(method, password, out);
+}
+
 fn decodeBase64Key(encoded: []const u8, out: []u8) CryptoError!void {
     if (try decodeBase64KeyWith(std.base64.standard.Decoder, encoded, out)) return;
     if (try decodeBase64KeyWith(std.base64.standard_no_pad.Decoder, encoded, out)) return;
+    if (try decodeBase64KeyWith(std.base64.url_safe.Decoder, encoded, out)) return;
+    if (try decodeBase64KeyWith(std.base64.url_safe_no_pad.Decoder, encoded, out)) return;
     return error.InvalidKeyLength;
 }
 
@@ -159,6 +170,30 @@ fn decodeBase64KeyWith(decoder: std.base64.Base64Decoder, encoded: []const u8, o
     const decoded_len = decoder.calcSizeForSlice(encoded) catch return false;
     if (decoded_len != out.len) return false;
     decoder.decode(out, encoded) catch return false;
+    return true;
+}
+
+fn decodeBase64KeyPrefix(encoded: []const u8, out: []u8) CryptoError!void {
+    if (try decodeBase64KeyPrefixWith(std.base64.standard.Decoder, encoded, out)) return;
+    if (try decodeBase64KeyPrefixWith(std.base64.standard_no_pad.Decoder, encoded, out)) return;
+    if (try decodeBase64KeyPrefixWith(std.base64.url_safe.Decoder, encoded, out)) return;
+    if (try decodeBase64KeyPrefixWith(std.base64.url_safe_no_pad.Decoder, encoded, out)) return;
+    return error.InvalidKeyLength;
+}
+
+fn decodeBase64KeyPrefixWith(decoder: std.base64.Base64Decoder, encoded: []const u8, out: []u8) CryptoError!bool {
+    const decoded_len = decoder.calcSizeForSlice(encoded) catch return false;
+    if (decoded_len < out.len) return false;
+    if (decoded_len == out.len) {
+        decoder.decode(out, encoded) catch return false;
+        return true;
+    }
+
+    var decoded: [128]u8 = undefined;
+    if (decoded_len > decoded.len) return false;
+    defer std.crypto.secureZero(u8, decoded[0..decoded_len]);
+    decoder.decode(decoded[0..decoded_len], encoded) catch return false;
+    @memcpy(out, decoded[0..out.len]);
     return true;
 }
 
@@ -911,6 +946,24 @@ test "AEAD-2022 master key decodes base64 password" {
         0x64, 0xa9, 0xf4, 0xac, 0x84, 0xd9, 0xa6, 0xfc,
         0x76, 0xe9, 0x5c, 0x89, 0xac, 0x1e, 0xef, 0x8a,
     }, &chacha20);
+}
+
+test "libev raw key bypasses password derivation" {
+    var key: [16]u8 = undefined;
+    try deriveMasterKeyWithRawKey(.aes_128_gcm, "ignored", "AQIDBAUGBwgJCgsMDQ4PEA==", &key);
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        0x01, 0x02, 0x03, 0x04,
+        0x05, 0x06, 0x07, 0x08,
+        0x09, 0x0a, 0x0b, 0x0c,
+        0x0d, 0x0e, 0x0f, 0x10,
+    }, &key);
+
+    var url_input = [_]u8{0xff} ** 32;
+    var encoded: [std.base64.url_safe_no_pad.Encoder.calcSize(url_input.len)]u8 = undefined;
+    const encoded_slice = std.base64.url_safe_no_pad.Encoder.encode(&encoded, &url_input);
+    var url_key: [16]u8 = undefined;
+    try deriveMasterKeyWithRawKey(.aes_128_gcm, "ignored", encoded_slice, &url_key);
+    try std.testing.expectEqualSlices(u8, url_input[0..url_key.len], &url_key);
 }
 
 test "AEAD chunk encrypt/decrypt round trip" {

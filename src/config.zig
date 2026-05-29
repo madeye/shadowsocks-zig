@@ -100,6 +100,7 @@ pub const Server = struct {
     host: []const u8,
     port: u16,
     password: []const u8,
+    key: ?[]const u8,
     method: crypto.CipherKind,
     mode: Mode,
     tcp_weight: u16,
@@ -247,6 +248,7 @@ pub const Config = struct {
             .host = try a.dupe(u8, server_host),
             .port = server_port,
             .password = try a.dupe(u8, password),
+            .key = null,
             .method = overrides.method orelse .aes_256_gcm,
             .mode = mode,
             .tcp_weight = server_weight_scale,
@@ -383,8 +385,10 @@ pub const Config = struct {
         const object = value.object;
         const default_port = parseRequiredPort(object.get("server_port") orelse root.get("server_port")) orelse return error.MissingServerPort;
         const address = try parseServerAddress(asString(object.get("server") orelse root.get("server")) orelse return error.MissingServer, default_port);
-        const password = asString(object.get("password") orelse root.get("password")) orelse return error.MissingPassword;
-        return try parseServerResolved(allocator, object, root, address.host, address.port, password);
+        const password = asString(object.get("password") orelse root.get("password"));
+        const key = asString(object.get("key") orelse root.get("key"));
+        if (password == null and key == null) return error.MissingPassword;
+        return try parseServerResolved(allocator, object, root, address.host, address.port, password orelse "", key);
     }
 
     fn parseServerResolved(
@@ -394,6 +398,7 @@ pub const Config = struct {
         host: []const u8,
         port: u16,
         password: []const u8,
+        key: ?[]const u8,
     ) ConfigError!Server {
         const method_name = asString(object.get("method") orelse root.get("method")) orelse "aes-256-gcm";
         const method = crypto.CipherKind.parse(method_name) catch return error.InvalidCipher;
@@ -402,6 +407,7 @@ pub const Config = struct {
             .host = try allocator.dupe(u8, host),
             .port = port,
             .password = try allocator.dupe(u8, password),
+            .key = try dupeOptionalSlice(allocator, key),
             .method = method,
             .mode = mode,
             .tcp_weight = try parseWeight(object.get("tcp_weight") orelse root.get("tcp_weight")),
@@ -466,10 +472,12 @@ fn appendClassicServerArray(
 ) ConfigError!void {
     if (server_value != .array) return error.InvalidConfig;
     const default_port = parseRequiredPort(root.get("server_port")) orelse return error.MissingServerPort;
-    const password = asString(root.get("password")) orelse return error.MissingPassword;
+    const password = asString(root.get("password"));
+    const key = asString(root.get("key"));
+    if (password == null and key == null) return error.MissingPassword;
     for (server_value.array.items) |item| {
         const address = try parseServerAddress(asString(item) orelse return error.InvalidConfig, default_port);
-        try servers.append(allocator, try Config.parseServerResolved(allocator, root, root, address.host, address.port, password));
+        try servers.append(allocator, try Config.parseServerResolved(allocator, root, root, address.host, address.port, password orelse "", key));
     }
 }
 
@@ -486,7 +494,7 @@ fn appendPortPasswordServers(
     while (iterator.next()) |entry| {
         const port = try parsePortText(entry.key_ptr.*);
         const password = asString(entry.value_ptr.*) orelse return error.InvalidConfig;
-        try servers.append(allocator, try Config.parseServerResolved(allocator, root, root, host, port, password));
+        try servers.append(allocator, try Config.parseServerResolved(allocator, root, root, host, port, password, null));
     }
 }
 
@@ -872,6 +880,23 @@ test "parse libev classic server array" {
     try std.testing.expectEqualStrings("secret", cfg.servers[3].password);
     try std.testing.expectEqual(crypto.CipherKind.aes_128_gcm, cfg.servers[3].method);
     try std.testing.expectEqual(Mode.tcp_and_udp, cfg.servers[3].mode);
+}
+
+test "parse libev raw key without password" {
+    var cfg = try Config.parseSlice(std.testing.allocator,
+        \\{
+        \\  "server": "127.0.0.1",
+        \\  "server_port": 8388,
+        \\  "key": "AQIDBAUGBwgJCgsMDQ4PEA==",
+        \\  "method": "aes-128-gcm"
+        \\}
+    );
+    defer cfg.deinit();
+
+    try std.testing.expectEqualStrings("127.0.0.1", cfg.servers[0].host);
+    try std.testing.expectEqualStrings("", cfg.servers[0].password);
+    try std.testing.expectEqualStrings("AQIDBAUGBwgJCgsMDQ4PEA==", cfg.servers[0].key.?);
+    try std.testing.expectEqual(crypto.CipherKind.aes_128_gcm, cfg.servers[0].method);
 }
 
 test "parse libev port_password entries" {

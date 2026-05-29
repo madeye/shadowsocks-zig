@@ -936,7 +936,7 @@ fn serverConnection(
     if (clientBlocked(access_control, client.*)) return error.ClientBlockedByAcl;
 
     var master: [32]u8 = undefined;
-    try crypto.deriveMasterKey(server_cfg.method, server_cfg.password, master[0..server_cfg.method.keyLen()]);
+    try crypto.deriveMasterKeyWithRawKey(server_cfg.method, server_cfg.password, server_cfg.key, master[0..server_cfg.method.keyLen()]);
 
     if (server_cfg.method.category() == .aead2022) {
         return try serverConnectionAead2022(allocator, io, client, server_cfg, master, replay_protector, access_control, traffic_counter);
@@ -1075,7 +1075,7 @@ fn openRemoteTunnel(allocator: std.mem.Allocator, io: std.Io, server_cfg: config
     errdefer remote.close();
 
     var master: [32]u8 = undefined;
-    try crypto.deriveMasterKey(server_cfg.method, server_cfg.password, master[0..server_cfg.method.keyLen()]);
+    try crypto.deriveMasterKeyWithRawKey(server_cfg.method, server_cfg.password, server_cfg.key, master[0..server_cfg.method.keyLen()]);
 
     var salt: [32]u8 = undefined;
     try io.randomSecure(salt[0..server_cfg.method.saltLen()]);
