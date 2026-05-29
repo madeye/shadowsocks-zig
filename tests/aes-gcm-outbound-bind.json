@@ -1,0 +1,11 @@
+{
+  "server": "127.0.0.1",
+  "server_port": 8426,
+  "local_address": "127.0.0.1",
+  "local_port": 1126,
+  "local_ipv4_address": "127.0.0.2",
+  "local_ipv6_address": "::1",
+  "password": "secret",
+  "method": "aes-128-gcm",
+  "mode": "tcp_only"
+}

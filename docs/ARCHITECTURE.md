@@ -95,6 +95,12 @@ TCP sockets from clients. `tcp_outgoing_sndbuf` / `tcp_outgoing_rcvbuf` are
 applied before outbound TCP connects to configured Shadowsocks servers or
 direct target sockets.
 
+In server mode, libev's `local_address`, `local_ipv4_address`, and
+`local_ipv6_address` map to outbound TCP bind addresses, matching
+shadowsocks-rust's server-side `local_address` meaning. The bind is selected by
+target address family and applied before the nonblocking connect to the remote
+TCP target.
+
 SOCKS5 username/password authentication follows shadowsocks-rust's
 `socks5_auth_config_path` convention. The file is parsed as:
 

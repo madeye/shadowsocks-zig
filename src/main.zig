@@ -134,8 +134,16 @@ pub fn main(init: std.process.Init) !void {
         return error.InvalidArgs;
     };
     if (bind_host) |host| {
-        if (mode == .server) {
-            overrides.server_host = host;
+        const bind_mode = if (mode == .check) shadowsocks.cli.defaultModeFromExecutablePath(executable_path) orelse .local else mode;
+        if (bind_mode == .server) {
+            if (std.Io.net.IpAddress.parse(host, 0)) |address| {
+                switch (address) {
+                    .ip4 => overrides.outbound_bind.ipv4 = host,
+                    .ip6 => overrides.outbound_bind.ipv6 = host,
+                }
+            } else |_| {
+                return error.InvalidArgs;
+            }
         } else {
             overrides.local_host = host;
         }
@@ -189,6 +197,12 @@ pub fn main(init: std.process.Init) !void {
                 try stdout.print("  ipv6_first=true\n", .{});
             }
             try printTcpBuffers(stdout, "server", server_cfg.tcp_buffers);
+            if (server_cfg.outbound_bind.hasAny()) {
+                try stdout.print("  outbound_bind", .{});
+                if (server_cfg.outbound_bind.ipv4) |host| try stdout.print(" ipv4={s}", .{host});
+                if (server_cfg.outbound_bind.ipv6) |host| try stdout.print(" ipv6={s}", .{host});
+                try stdout.print("\n", .{});
+            }
         }
         for (cfg.locals) |local_cfg| {
             try stdout.print("local {s}:{d} protocol={s} mode={s}", .{ local_cfg.host, local_cfg.port, local_cfg.protocol.name(), @tagName(local_cfg.mode) });

@@ -60,7 +60,9 @@ Current state:
   `-b`, `-l`, `-k`, `-m`, `-u`, `-U`, `-L`, `--plugin`, `--plugin-opts`,
   `--key`, `--acl`, `-6`, `--manager-address`, and
   `--tcp-{incoming,outgoing}-{sndbuf,rcvbuf}` can build or override config at
-  startup.
+  startup. In server mode, libev `-b` / `local_address` /
+  `local_ipv4_address` / `local_ipv6_address` select outbound TCP source bind
+  addresses; `-s` remains the server listen address.
 - UDP association timeout and capacity controls via `udp_timeout` and
   `udp_max_associations`, matching shadowsocks-rust's global config names.
 - TCP SIP003 plugin process handling via `plugin`, `plugin_opts`,
@@ -89,7 +91,8 @@ Current state:
   Libev-style `ipv6_first` / `-6` makes domain resolution prefer IPv6 results
   for configured server endpoints and direct outbound target connects.
   Libev-style TCP buffer sizes set SO_SNDBUF/SO_RCVBUF on accepted incoming TCP
-  sockets and outbound TCP connect sockets.
+  sockets and outbound TCP connect sockets. In server mode, libev outbound bind
+  addresses are applied before connecting to TCP targets.
 - Server-side AEAD salt replay rejection with a shared rotating replay filter.
 - SOCKS5 username/password authentication for TCP local mode via
   `socks5_auth_config_path`.

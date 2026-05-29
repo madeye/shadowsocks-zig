@@ -117,6 +117,20 @@ pub const TcpBufferConfig = struct {
     }
 };
 
+pub const OutboundBindConfig = struct {
+    ipv4: ?[]const u8 = null,
+    ipv6: ?[]const u8 = null,
+
+    pub fn hasAny(self: OutboundBindConfig) bool {
+        return self.ipv4 != null or self.ipv6 != null;
+    }
+
+    pub fn merge(self: *OutboundBindConfig, other: OutboundBindConfig) void {
+        if (other.ipv4) |value| self.ipv4 = value;
+        if (other.ipv6) |value| self.ipv6 = value;
+    }
+};
+
 pub const Server = struct {
     host: []const u8,
     port: u16,
@@ -128,6 +142,7 @@ pub const Server = struct {
     reuse_port: bool,
     ipv6_first: bool,
     tcp_buffers: TcpBufferConfig,
+    outbound_bind: OutboundBindConfig,
     tcp_weight: u16,
     udp_weight: u16,
     acl_path: ?[]const u8,
@@ -201,6 +216,7 @@ pub const Overrides = struct {
     reuse_port: ?bool = null,
     ipv6_first: ?bool = null,
     tcp_buffers: TcpBufferConfig = .{},
+    outbound_bind: OutboundBindConfig = .{},
 
     pub fn hasAny(self: Overrides) bool {
         return self.server_host != null or
@@ -224,7 +240,8 @@ pub const Overrides = struct {
             self.no_delay != null or
             self.reuse_port != null or
             self.ipv6_first != null or
-            self.tcp_buffers.hasAny();
+            self.tcp_buffers.hasAny() or
+            self.outbound_bind.hasAny();
     }
 };
 
@@ -296,6 +313,7 @@ pub const Config = struct {
             .reuse_port = overrides.reuse_port orelse false,
             .ipv6_first = overrides.ipv6_first orelse false,
             .tcp_buffers = overrides.tcp_buffers,
+            .outbound_bind = try dupeOutboundBind(a, overrides.outbound_bind),
             .tcp_weight = server_weight_scale,
             .udp_weight = server_weight_scale,
             .acl_path = try dupeOptionalSlice(a, overrides.acl_path),
@@ -360,6 +378,7 @@ pub const Config = struct {
             if (overrides.reuse_port) |reuse_port| server.reuse_port = reuse_port;
             if (overrides.ipv6_first) |ipv6_first| server.ipv6_first = ipv6_first;
             server.tcp_buffers.merge(overrides.tcp_buffers);
+            server.outbound_bind.merge(try dupeOutboundBind(a, overrides.outbound_bind));
         }
         for (self.locals) |*local| {
             if (overrides.local_host) |host| local.host = try a.dupe(u8, host);
@@ -473,6 +492,7 @@ pub const Config = struct {
             .reuse_port = asBool(object.get("reuse_port") orelse root.get("reuse_port")) orelse false,
             .ipv6_first = asBool(object.get("ipv6_first") orelse root.get("ipv6_first")) orelse false,
             .tcp_buffers = try parseTcpBufferConfig(object, root),
+            .outbound_bind = try parseOutboundBindConfig(allocator, object, root),
             .tcp_weight = try parseWeight(object.get("tcp_weight") orelse root.get("tcp_weight")),
             .udp_weight = try parseWeight(object.get("udp_weight") orelse root.get("udp_weight")),
             .acl_path = try dupOptionalNonEmptyString(allocator, object.get("acl") orelse root.get("acl")),
@@ -682,6 +702,30 @@ fn parseTcpBufferSize(value: ?std.json.Value) ConfigError!?u32 {
     return @intCast(raw);
 }
 
+fn parseOutboundBindConfig(allocator: std.mem.Allocator, object: std.json.ObjectMap, root: std.json.ObjectMap) ConfigError!OutboundBindConfig {
+    var bind = OutboundBindConfig{};
+    if (asString(object.get("local_address") orelse root.get("local_address"))) |host| {
+        try assignOutboundBindHost(allocator, &bind, host);
+    }
+    if (asString(object.get("local_ipv4_address") orelse root.get("local_ipv4_address"))) |host| {
+        try assignOutboundBindHost(allocator, &bind, host);
+    }
+    if (asString(object.get("local_ipv6_address") orelse root.get("local_ipv6_address"))) |host| {
+        try assignOutboundBindHost(allocator, &bind, host);
+    }
+    return bind;
+}
+
+fn assignOutboundBindHost(allocator: std.mem.Allocator, bind: *OutboundBindConfig, host: []const u8) ConfigError!void {
+    if (host.len == 0) return;
+    if (std.Io.net.IpAddress.parse(host, 0)) |address| {
+        switch (address) {
+            .ip4 => bind.ipv4 = try allocator.dupe(u8, host),
+            .ip6 => bind.ipv6 = try allocator.dupe(u8, host),
+        }
+    } else |_| {}
+}
+
 fn parseManager(allocator: std.mem.Allocator, root: std.json.ObjectMap) ConfigError!?Manager {
     const address_value = root.get("manager_address") orelse return null;
     const address = asString(address_value) orelse return error.InvalidConfig;
@@ -769,6 +813,13 @@ fn dupeOptionalSlice(allocator: std.mem.Allocator, value: ?[]const u8) ConfigErr
     return try allocator.dupe(u8, s);
 }
 
+fn dupeOutboundBind(allocator: std.mem.Allocator, value: OutboundBindConfig) ConfigError!OutboundBindConfig {
+    return .{
+        .ipv4 = try dupeOptionalSlice(allocator, value.ipv4),
+        .ipv6 = try dupeOptionalSlice(allocator, value.ipv6),
+    };
+}
+
 fn parseStringArray(allocator: std.mem.Allocator, value: ?std.json.Value) ConfigError![]const []const u8 {
     const v = value orelse return &.{};
     if (v != .array) return error.InvalidConfig;
@@ -850,6 +901,7 @@ test "parse classic shadowsocks config" {
         \\  "server": "127.0.0.1",
         \\  "server_port": 8388,
         \\  "local_address": "127.0.0.1",
+        \\  "local_ipv6_address": "::1",
         \\  "local_port": 1080,
         \\  "password": "secret",
         \\  "method": "aes-256-gcm",
@@ -904,6 +956,8 @@ test "parse classic shadowsocks config" {
     try std.testing.expectEqual(@as(?u32, 32769), cfg.locals[0].tcp_buffers.incoming_rcvbuf);
     try std.testing.expectEqual(@as(?u32, 32770), cfg.locals[0].tcp_buffers.outgoing_sndbuf);
     try std.testing.expectEqual(@as(?u32, 32771), cfg.locals[0].tcp_buffers.outgoing_rcvbuf);
+    try std.testing.expectEqualStrings("127.0.0.1", cfg.servers[0].outbound_bind.ipv4.?);
+    try std.testing.expectEqualStrings("::1", cfg.servers[0].outbound_bind.ipv6.?);
     try std.testing.expectEqualStrings("127.0.0.1", cfg.manager.?.host);
     try std.testing.expectEqual(@as(u16, 6001), cfg.manager.?.port);
     try std.testing.expectEqual(ManagerTransport.ip, cfg.manager.?.transport);
@@ -925,6 +979,10 @@ test "build config from libev-style CLI overrides" {
         .no_delay = true,
         .reuse_port = true,
         .ipv6_first = true,
+        .outbound_bind = .{
+            .ipv4 = "127.0.0.2",
+            .ipv6 = "::1",
+        },
         .tcp_buffers = .{
             .incoming_sndbuf = 40960,
             .incoming_rcvbuf = 40961,
@@ -951,6 +1009,8 @@ test "build config from libev-style CLI overrides" {
     try std.testing.expectEqual(@as(?u32, 40961), cfg.locals[0].tcp_buffers.incoming_rcvbuf);
     try std.testing.expectEqual(@as(?u32, 40962), cfg.servers[0].tcp_buffers.outgoing_sndbuf);
     try std.testing.expectEqual(@as(?u32, 40963), cfg.locals[0].tcp_buffers.outgoing_rcvbuf);
+    try std.testing.expectEqualStrings("127.0.0.2", cfg.servers[0].outbound_bind.ipv4.?);
+    try std.testing.expectEqualStrings("::1", cfg.servers[0].outbound_bind.ipv6.?);
     try std.testing.expectEqualStrings("fake-plugin", cfg.servers[0].plugin.?);
     try std.testing.expectEqualStrings("obfs=tls", cfg.servers[0].plugin_opts.?);
 }
@@ -994,6 +1054,9 @@ test "apply CLI overrides to parsed config" {
         .no_delay = true,
         .reuse_port = true,
         .ipv6_first = true,
+        .outbound_bind = .{
+            .ipv4 = "127.0.0.3",
+        },
         .tcp_buffers = .{
             .incoming_sndbuf = 49152,
             .incoming_rcvbuf = 49153,
@@ -1020,6 +1083,7 @@ test "apply CLI overrides to parsed config" {
     try std.testing.expectEqual(@as(?u32, 49153), cfg.locals[0].tcp_buffers.incoming_rcvbuf);
     try std.testing.expectEqual(@as(?u32, 49154), cfg.servers[0].tcp_buffers.outgoing_sndbuf);
     try std.testing.expectEqual(@as(?u32, 49155), cfg.locals[0].tcp_buffers.outgoing_rcvbuf);
+    try std.testing.expectEqualStrings("127.0.0.3", cfg.servers[0].outbound_bind.ipv4.?);
 }
 
 test "apply CLI password override clears configured raw key" {

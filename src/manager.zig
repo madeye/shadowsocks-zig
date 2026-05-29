@@ -22,6 +22,7 @@ const Entry = struct {
     reuse_port: bool = false,
     ipv6_first: bool = false,
     tcp_buffers: config.TcpBufferConfig = .{},
+    outbound_bind: config.OutboundBindConfig = .{},
     acl_path: ?[]const u8 = null,
     plugin: ?[]const u8 = null,
     plugin_opts: ?[]const u8 = null,
@@ -229,6 +230,7 @@ pub const Manager = struct {
                 .outgoing_sndbuf = jsonU32(object.get("tcp_outgoing_sndbuf")),
                 .outgoing_rcvbuf = jsonU32(object.get("tcp_outgoing_rcvbuf")),
             },
+            .outbound_bind = try parseEntryOutboundBind(self.allocator, object),
             .plugin = plugin_name,
             .plugin_opts = plugin_opts,
             .plugin_args = plugin_args,
@@ -355,6 +357,7 @@ pub const Manager = struct {
                 try out.appendSlice(self.allocator, ",\"ipv6_first\":true");
             }
             try appendTcpBuffersCompact(&out, self.allocator, entry.tcp_buffers);
+            try appendOutboundBindCompact(&out, self.allocator, entry.outbound_bind);
             try out.appendSlice(self.allocator, "},");
         }
         if (self.entries.items.len > 0) {
@@ -415,6 +418,7 @@ fn entryFromServer(allocator: std.mem.Allocator, server_cfg: config.Server) !Ent
         .reuse_port = server_cfg.reuse_port,
         .ipv6_first = server_cfg.ipv6_first,
         .tcp_buffers = server_cfg.tcp_buffers,
+        .outbound_bind = try dupeOutboundBind(allocator, server_cfg.outbound_bind),
         .acl_path = acl_path,
         .plugin = plugin_name,
         .plugin_opts = plugin_opts,
@@ -432,6 +436,8 @@ fn freeEntryFields(allocator: std.mem.Allocator, entry: Entry) void {
     if (entry.acl_path) |value| allocator.free(value);
     if (entry.plugin) |value| allocator.free(value);
     if (entry.plugin_opts) |value| allocator.free(value);
+    if (entry.outbound_bind.ipv4) |value| allocator.free(value);
+    if (entry.outbound_bind.ipv6) |value| allocator.free(value);
     freeStringArray(allocator, entry.plugin_args);
 }
 
@@ -507,6 +513,36 @@ fn dupeOptionalBytes(allocator: std.mem.Allocator, value: ?[]const u8) !?[]const
     const s = value orelse return null;
     if (s.len == 0) return null;
     return try allocator.dupe(u8, s);
+}
+
+fn dupeOutboundBind(allocator: std.mem.Allocator, value: config.OutboundBindConfig) !config.OutboundBindConfig {
+    return .{
+        .ipv4 = try dupeOptionalBytes(allocator, value.ipv4),
+        .ipv6 = try dupeOptionalBytes(allocator, value.ipv6),
+    };
+}
+
+fn parseEntryOutboundBind(allocator: std.mem.Allocator, object: std.json.ObjectMap) !config.OutboundBindConfig {
+    var bind = config.OutboundBindConfig{};
+    if (jsonString(object.get("local_address"))) |host| try assignEntryOutboundBind(allocator, &bind, host);
+    if (jsonString(object.get("local_ipv4_address"))) |host| try assignEntryOutboundBind(allocator, &bind, host);
+    if (jsonString(object.get("local_ipv6_address"))) |host| try assignEntryOutboundBind(allocator, &bind, host);
+    return bind;
+}
+
+fn assignEntryOutboundBind(allocator: std.mem.Allocator, bind: *config.OutboundBindConfig, host: []const u8) !void {
+    if (std.Io.net.IpAddress.parse(host, 0)) |address| {
+        switch (address) {
+            .ip4 => {
+                if (bind.ipv4) |old| allocator.free(old);
+                bind.ipv4 = try allocator.dupe(u8, host);
+            },
+            .ip6 => {
+                if (bind.ipv6) |old| allocator.free(old);
+                bind.ipv6 = try allocator.dupe(u8, host);
+            },
+        }
+    } else |_| {}
 }
 
 fn dupeJsonStringArray(allocator: std.mem.Allocator, value: ?std.json.Value) ![]const []const u8 {
@@ -621,6 +657,28 @@ fn appendTcpBuffersPretty(out: *std.ArrayList(u8), allocator: std.mem.Allocator,
     }
 }
 
+fn appendOutboundBindCompact(out: *std.ArrayList(u8), allocator: std.mem.Allocator, bind: config.OutboundBindConfig) !void {
+    if (bind.ipv4) |host| {
+        try out.appendSlice(allocator, ",\"local_ipv4_address\":");
+        try appendJsonString(out, allocator, host);
+    }
+    if (bind.ipv6) |host| {
+        try out.appendSlice(allocator, ",\"local_ipv6_address\":");
+        try appendJsonString(out, allocator, host);
+    }
+}
+
+fn appendOutboundBindPretty(out: *std.ArrayList(u8), allocator: std.mem.Allocator, bind: config.OutboundBindConfig) !void {
+    if (bind.ipv4) |host| {
+        try out.appendSlice(allocator, ",\n  \"local_ipv4_address\":");
+        try appendJsonString(out, allocator, host);
+    }
+    if (bind.ipv6) |host| {
+        try out.appendSlice(allocator, ",\n  \"local_ipv6_address\":");
+        try appendJsonString(out, allocator, host);
+    }
+}
+
 fn portAvailable(entry: Entry) !bool {
     if (entry.mode.enableTcp()) {
         if (!try netio.canBindTcp(entry.host, entry.port)) return false;
@@ -659,6 +717,7 @@ fn renderServerConfig(allocator: std.mem.Allocator, entry: Entry, manager_addres
         try out.appendSlice(allocator, ",\n  \"ipv6_first\":true");
     }
     try appendTcpBuffersPretty(&out, allocator, entry.tcp_buffers);
+    try appendOutboundBindPretty(&out, allocator, entry.outbound_bind);
     try out.appendSlice(allocator, ",\n  \"manager_address\":");
     try appendJsonString(&out, allocator, manager_address.address);
     if (entry.acl_path) |acl_path| {
@@ -849,6 +908,8 @@ test "manager preserves configured raw keys" {
         \\  "tcp_incoming_rcvbuf": 57345,
         \\  "tcp_outgoing_sndbuf": 57346,
         \\  "tcp_outgoing_rcvbuf": 57347,
+        \\  "local_ipv4_address": "127.0.0.2",
+        \\  "local_ipv6_address": "::1",
         \\  "manager_address": "127.0.0.1:6001"
         \\}
     );
@@ -867,6 +928,8 @@ test "manager preserves configured raw keys" {
     try std.testing.expect(std.mem.indexOf(u8, list, "\"tcp_incoming_rcvbuf\":57345") != null);
     try std.testing.expect(std.mem.indexOf(u8, list, "\"tcp_outgoing_sndbuf\":57346") != null);
     try std.testing.expect(std.mem.indexOf(u8, list, "\"tcp_outgoing_rcvbuf\":57347") != null);
+    try std.testing.expect(std.mem.indexOf(u8, list, "\"local_ipv4_address\":\"127.0.0.2\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, list, "\"local_ipv6_address\":\"::1\"") != null);
 
     const rendered = try renderServerConfig(std.testing.allocator, mgr.entries.items[0], cfg.manager.?);
     defer std.testing.allocator.free(rendered);
@@ -879,4 +942,6 @@ test "manager preserves configured raw keys" {
     try std.testing.expect(std.mem.indexOf(u8, rendered, "\"tcp_incoming_rcvbuf\":57345") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "\"tcp_outgoing_sndbuf\":57346") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "\"tcp_outgoing_rcvbuf\":57347") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "\"local_ipv4_address\":\"127.0.0.2\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "\"local_ipv6_address\":\"::1\"") != null);
 }

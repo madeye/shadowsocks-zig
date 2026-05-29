@@ -24,6 +24,10 @@ pub const TcpListener = struct {
         closeFd(self.fd);
     }
 
+    pub fn localAddress(self: *const TcpListener) !net.IpAddress {
+        return try socketLocalAddress(self.fd);
+    }
+
     pub fn accept(self: *const TcpListener) !TcpStream {
         while (true) {
             if (!try libuv.waitReadable(self.fd, infinite_timeout_ms)) continue;
@@ -47,6 +51,10 @@ pub const TcpStream = struct {
 
     pub fn peerAddress(self: *const TcpStream) !net.IpAddress {
         return try socketPeerAddress(self.fd);
+    }
+
+    pub fn localAddress(self: *const TcpStream) !net.IpAddress {
+        return try socketLocalAddress(self.fd);
     }
 
     pub fn setNoDelay(self: *const TcpStream) void {
@@ -279,10 +287,20 @@ pub fn connectTcpAddress(address: net.IpAddress) !TcpStream {
 }
 
 pub fn connectTcpAddressWithBuffers(address: net.IpAddress, buffers: config.TcpBufferConfig) !TcpStream {
+    return try connectTcpAddressWithOptions(address, .{ .buffers = buffers });
+}
+
+const TcpConnectOptions = struct {
+    buffers: config.TcpBufferConfig = .{},
+    outbound_bind: config.OutboundBindConfig = .{},
+};
+
+pub fn connectTcpAddressWithOptions(address: net.IpAddress, options: TcpConnectOptions) !TcpStream {
     var storage = ipAddressToPosix(address);
     const fd = try openPosixSocket(posixAddressFamily(address), std.posix.SOCK.STREAM);
     errdefer closeFd(fd);
-    try applyTcpOutgoingBuffers(fd, buffers);
+    try applyTcpOutgoingBuffers(fd, options.buffers);
+    try bindTcpOutbound(fd, address, options.outbound_bind);
     try setNonblocking(fd);
     connectPosixSocket(fd, &storage.any, posixAddressLen(address)) catch |err| switch (err) {
         error.WouldBlock => {
@@ -292,6 +310,16 @@ pub fn connectTcpAddressWithBuffers(address: net.IpAddress, buffers: config.TcpB
         else => |e| return e,
     };
     return .{ .fd = fd };
+}
+
+fn bindTcpOutbound(fd: std.posix.socket_t, remote: net.IpAddress, bind: config.OutboundBindConfig) !void {
+    const host = switch (remote) {
+        .ip4 => bind.ipv4,
+        .ip6 => bind.ipv6,
+    } orelse return;
+    const local = try net.IpAddress.parse(host, 0);
+    var storage = ipAddressToPosix(local);
+    try bindPosixSocket(fd, &storage.any, posixAddressLen(local));
 }
 
 pub fn bindUdp(host: []const u8, port: u16, reuse_port: bool) !UdpSocket {
@@ -660,13 +688,20 @@ fn setUdpDisableFragmentation(fd: std.posix.socket_t, address: net.IpAddress) !v
 
 fn setNonblocking(fd: std.posix.socket_t) !void {
     while (true) {
-        const rc = std.posix.system.fcntl(fd, std.posix.F.GETFL, @as(c_int, 0));
+        const rc = switch (builtin.os.tag) {
+            .linux => std.posix.system.fcntl(fd, std.posix.F.GETFL, @as(usize, 0)),
+            else => std.posix.system.fcntl(fd, std.posix.F.GETFL, @as(c_int, 0)),
+        };
         switch (std.posix.errno(rc)) {
             .SUCCESS => {
                 const flags: c_int = @intCast(rc);
                 const nonblock: c_int = @intCast(@as(u32, @bitCast(std.posix.O{ .NONBLOCK = true })));
                 while (true) {
-                    const set_rc = std.posix.system.fcntl(fd, std.posix.F.SETFL, @as(c_int, flags | nonblock));
+                    const set_arg = flags | nonblock;
+                    const set_rc = switch (builtin.os.tag) {
+                        .linux => std.posix.system.fcntl(fd, std.posix.F.SETFL, @as(usize, @intCast(@as(c_uint, @bitCast(set_arg))))),
+                        else => std.posix.system.fcntl(fd, std.posix.F.SETFL, @as(c_int, set_arg)),
+                    };
                     switch (std.posix.errno(set_rc)) {
                         .SUCCESS => return,
                         .INTR => continue,
@@ -764,7 +799,11 @@ fn checkConnectResult(fd: std.posix.socket_t) !void {
     var err_value: c_int = 0;
     var len: std.posix.socklen_t = @sizeOf(c_int);
     while (true) {
-        switch (std.posix.errno(std.posix.system.getsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.ERROR, &err_value, &len))) {
+        const rc = switch (builtin.os.tag) {
+            .linux => std.posix.system.getsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.ERROR, std.mem.asBytes(&err_value).ptr, &len),
+            else => std.posix.system.getsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.ERROR, &err_value, &len),
+        };
+        switch (std.posix.errno(rc)) {
             .SUCCESS => break,
             .INTR => continue,
             .BADF => return error.SocketNotConnected,
@@ -1578,6 +1617,43 @@ test "UDP original destination parser rejects truncated control message" {
     var msg = testControlMessage(&control_buf, @sizeOf(std.c.cmsghdr) + 4);
 
     try std.testing.expectError(error.RedirectionOriginalDestinationMissing, originalDestinationFromControl(&msg, .freebsd_pf));
+}
+
+test "TCP outbound bind selects IPv4 source address on Linux loopback" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    var listener = try listenTcp("127.0.0.1", 0, false);
+    defer listener.close();
+    const address = try listener.localAddress();
+    const port = switch (address) {
+        .ip4 => |ip4| ip4.port,
+        .ip6 => return error.SkipZigTest,
+    };
+
+    var accepted_peer: ?net.IpAddress = null;
+    const thread = try std.Thread.spawn(.{}, acceptOneForOutboundBindTest, .{ &listener, &accepted_peer });
+    var stream = try connectTcpAddressWithOptions(.{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = port } }, .{
+        .outbound_bind = .{ .ipv4 = "127.0.0.2" },
+    });
+    defer stream.close();
+    const local = try stream.localAddress();
+    thread.join();
+
+    try std.testing.expect(local.eql(&.{ .ip4 = .{ .bytes = .{ 127, 0, 0, 2 }, .port = switch (local) {
+        .ip4 => |ip4| ip4.port,
+        .ip6 => unreachable,
+    } } }));
+    const peer = accepted_peer orelse return error.ConnectionRefused;
+    try std.testing.expect(peer.eql(&.{ .ip4 = .{ .bytes = .{ 127, 0, 0, 2 }, .port = switch (peer) {
+        .ip4 => |ip4| ip4.port,
+        .ip6 => unreachable,
+    } } }));
+}
+
+fn acceptOneForOutboundBindTest(listener: *TcpListener, peer: *?net.IpAddress) void {
+    var conn = listener.accept() catch return;
+    defer conn.close();
+    peer.* = conn.peerAddress() catch null;
 }
 
 fn writeTestControlMessage(buffer: []align(@alignOf(std.c.cmsghdr)) u8, offset: usize, level: c_int, cmsg_type: c_int, data: []const u8) usize {
