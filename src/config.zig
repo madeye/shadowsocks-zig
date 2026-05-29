@@ -148,6 +148,46 @@ pub const Manager = struct {
     path: []const u8,
 };
 
+pub const Overrides = struct {
+    server_host: ?[]const u8 = null,
+    server_port: ?u16 = null,
+    local_host: ?[]const u8 = null,
+    local_port: ?u16 = null,
+    password: ?[]const u8 = null,
+    method: ?crypto.CipherKind = null,
+    timeout_seconds: ?u64 = null,
+    mode: ?Mode = null,
+    protocol: ?LocalProtocol = null,
+    tcp_redir: ?RedirType = null,
+    udp_redir: ?RedirType = null,
+    forward_host: ?[]const u8 = null,
+    forward_port: ?u16 = null,
+    manager_address: ?[]const u8 = null,
+    acl_path: ?[]const u8 = null,
+    plugin: ?[]const u8 = null,
+    plugin_opts: ?[]const u8 = null,
+
+    pub fn hasAny(self: Overrides) bool {
+        return self.server_host != null or
+            self.server_port != null or
+            self.local_host != null or
+            self.local_port != null or
+            self.password != null or
+            self.method != null or
+            self.timeout_seconds != null or
+            self.mode != null or
+            self.protocol != null or
+            self.tcp_redir != null or
+            self.udp_redir != null or
+            self.forward_host != null or
+            self.forward_port != null or
+            self.manager_address != null or
+            self.acl_path != null or
+            self.plugin != null or
+            self.plugin_opts != null;
+    }
+};
+
 pub const Config = struct {
     allocator: std.mem.Allocator,
     arena: *std.heap.ArenaAllocator,
@@ -180,6 +220,111 @@ pub const Config = struct {
         var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
         defer parsed.deinit();
         return fromJsonValue(allocator, io, parsed.value);
+    }
+
+    pub fn fromOverrides(allocator: std.mem.Allocator, overrides: Overrides) ConfigError!Config {
+        var arena = try allocator.create(std.heap.ArenaAllocator);
+        arena.* = std.heap.ArenaAllocator.init(allocator);
+        errdefer {
+            arena.deinit();
+            allocator.destroy(arena);
+        }
+        const a = arena.allocator();
+        const protocol = overrides.protocol orelse .socks;
+        const mode = overrides.mode orelse parseLocalMode(protocol, null);
+        const timeout = overrides.timeout_seconds orelse 300;
+        const server_host = overrides.server_host orelse return error.MissingServer;
+        const server_port = overrides.server_port orelse return error.MissingServerPort;
+        const password = overrides.password orelse return error.MissingPassword;
+        const forward_host = overrides.forward_host;
+        const forward_port = overrides.forward_port;
+        if ((protocol == .tunnel or protocol == .dns) and (forward_host == null or forward_port == null)) {
+            return error.MissingForwardAddress;
+        }
+
+        const servers = try a.alloc(Server, 1);
+        servers[0] = .{
+            .host = try a.dupe(u8, server_host),
+            .port = server_port,
+            .password = try a.dupe(u8, password),
+            .method = overrides.method orelse .aes_256_gcm,
+            .mode = mode,
+            .tcp_weight = server_weight_scale,
+            .udp_weight = server_weight_scale,
+            .acl_path = try dupeOptionalSlice(a, overrides.acl_path),
+            .plugin = try dupeOptionalSlice(a, overrides.plugin),
+            .plugin_opts = try dupeOptionalSlice(a, overrides.plugin_opts),
+            .plugin_args = &.{},
+            .plugin_mode = mode,
+        };
+
+        const locals = try a.alloc(Local, 1);
+        locals[0] = .{
+            .host = try a.dupe(u8, overrides.local_host orelse "127.0.0.1"),
+            .port = overrides.local_port orelse 1080,
+            .mode = mode,
+            .protocol = protocol,
+            .tcp_redir = overrides.tcp_redir orelse RedirType.tcpDefault(),
+            .udp_redir = overrides.udp_redir orelse RedirType.udpDefault(),
+            .forward_host = try dupeOptionalSlice(a, forward_host),
+            .forward_port = forward_port,
+            .local_dns_host = null,
+            .local_dns_port = null,
+            .fake_dns_ipv4_network = null,
+            .fake_dns_ipv6_network = null,
+            .fake_dns_database_path = null,
+            .fake_dns_record_expire_duration = 10,
+            .acl_path = try dupeOptionalSlice(a, overrides.acl_path),
+            .socks5_users = &.{},
+        };
+
+        return .{
+            .allocator = allocator,
+            .arena = arena,
+            .servers = servers,
+            .locals = locals,
+            .manager = if (overrides.manager_address) |address| try parseManagerAddress(a, address) else null,
+            .timeout_seconds = timeout,
+            .udp_timeout_seconds = timeout,
+            .udp_max_associations = null,
+        };
+    }
+
+    pub fn applyOverrides(self: *Config, overrides: Overrides) ConfigError!void {
+        if (!overrides.hasAny()) return;
+        const a = self.arena.allocator();
+        for (self.servers) |*server| {
+            if (overrides.server_host) |host| server.host = try a.dupe(u8, host);
+            if (overrides.server_port) |port| server.port = port;
+            if (overrides.password) |password| server.password = try a.dupe(u8, password);
+            if (overrides.method) |method| server.method = method;
+            if (overrides.mode) |mode| server.mode = mode;
+            if (overrides.acl_path) |acl_path| server.acl_path = try a.dupe(u8, acl_path);
+            if (overrides.plugin) |plugin| server.plugin = try a.dupe(u8, plugin);
+            if (overrides.plugin_opts) |plugin_opts| server.plugin_opts = try a.dupe(u8, plugin_opts);
+            if (overrides.mode) |mode| server.plugin_mode = mode;
+        }
+        for (self.locals) |*local| {
+            if (overrides.local_host) |host| local.host = try a.dupe(u8, host);
+            if (overrides.local_port) |port| local.port = port;
+            if (overrides.mode) |mode| local.mode = mode;
+            if (overrides.protocol) |protocol| local.protocol = protocol;
+            if (overrides.tcp_redir) |redir| local.tcp_redir = redir;
+            if (overrides.udp_redir) |redir| local.udp_redir = redir;
+            if (overrides.forward_host) |host| local.forward_host = try a.dupe(u8, host);
+            if (overrides.forward_port) |port| local.forward_port = port;
+            if (overrides.acl_path) |acl_path| local.acl_path = try a.dupe(u8, acl_path);
+            if ((local.protocol == .tunnel or local.protocol == .dns) and (local.forward_host == null or local.forward_port == null)) {
+                return error.MissingForwardAddress;
+            }
+        }
+        if (overrides.timeout_seconds) |timeout| {
+            self.timeout_seconds = timeout;
+            self.udp_timeout_seconds = timeout;
+        }
+        if (overrides.manager_address) |address| {
+            self.manager = try parseManagerAddress(a, address);
+        }
     }
 
     fn fromJsonValue(allocator: std.mem.Allocator, io: ?std.Io, value: std.json.Value) ConfigError!Config {
@@ -351,7 +496,23 @@ fn parseManager(allocator: std.mem.Allocator, root: std.json.ObjectMap) ConfigEr
     const address_value = root.get("manager_address") orelse return null;
     const address = asString(address_value) orelse return error.InvalidConfig;
     if (address.len == 0) return null;
+    if (parseHostPort(address)) |_| {
+        return try parseManagerAddress(allocator, address);
+    } else |_| {
+        const maybe_port = asU64(root.get("manager_port"));
+        if (maybe_port == null) return try parseManagerAddress(allocator, address);
+        const port: u16 = @intCast(maybe_port.?);
+        return .{
+            .transport = .ip,
+            .address = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ address, port }),
+            .host = try allocator.dupe(u8, address),
+            .port = port,
+            .path = "",
+        };
+    }
+}
 
+fn parseManagerAddress(allocator: std.mem.Allocator, address: []const u8) ConfigError!Manager {
     if (parseHostPort(address)) |parsed| {
         return .{
             .transport = .ip,
@@ -361,23 +522,12 @@ fn parseManager(allocator: std.mem.Allocator, root: std.json.ObjectMap) ConfigEr
             .path = "",
         };
     } else |_| {
-        const maybe_port = asU64(root.get("manager_port"));
-        if (maybe_port == null) {
-            return .{
-                .transport = .unix,
-                .address = try allocator.dupe(u8, address),
-                .host = "",
-                .port = 0,
-                .path = try allocator.dupe(u8, address),
-            };
-        }
-        const port: u16 = @intCast(maybe_port.?);
         return .{
-            .transport = .ip,
-            .address = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ address, port }),
-            .host = try allocator.dupe(u8, address),
-            .port = port,
-            .path = "",
+            .transport = .unix,
+            .address = try allocator.dupe(u8, address),
+            .host = "",
+            .port = 0,
+            .path = try allocator.dupe(u8, address),
         };
     }
 }
@@ -411,6 +561,12 @@ fn dupString(allocator: std.mem.Allocator, value: std.json.Value) ConfigError![]
 
 fn dupOptionalNonEmptyString(allocator: std.mem.Allocator, value: ?std.json.Value) ConfigError!?[]const u8 {
     const s = asString(value) orelse return null;
+    if (s.len == 0) return null;
+    return try allocator.dupe(u8, s);
+}
+
+fn dupeOptionalSlice(allocator: std.mem.Allocator, value: ?[]const u8) ConfigError!?[]const u8 {
+    const s = value orelse return null;
     if (s.len == 0) return null;
     return try allocator.dupe(u8, s);
 }
@@ -532,6 +688,65 @@ test "parse classic shadowsocks config" {
     try std.testing.expectEqual(ManagerTransport.ip, cfg.manager.?.transport);
     try std.testing.expectEqual(@as(u64, 10), cfg.udp_timeout_seconds);
     try std.testing.expectEqual(@as(?usize, 32), cfg.udp_max_associations);
+}
+
+test "build config from libev-style CLI overrides" {
+    var cfg = try Config.fromOverrides(std.testing.allocator, .{
+        .server_host = "198.51.100.10",
+        .server_port = 8388,
+        .local_host = "127.0.0.2",
+        .local_port = 1081,
+        .password = "secret",
+        .method = .aes_128_gcm,
+        .mode = .tcp_and_udp,
+        .plugin = "fake-plugin",
+        .plugin_opts = "obfs=tls",
+    });
+    defer cfg.deinit();
+
+    try std.testing.expectEqualStrings("198.51.100.10", cfg.servers[0].host);
+    try std.testing.expectEqual(@as(u16, 8388), cfg.servers[0].port);
+    try std.testing.expectEqualStrings("127.0.0.2", cfg.locals[0].host);
+    try std.testing.expectEqual(@as(u16, 1081), cfg.locals[0].port);
+    try std.testing.expectEqual(crypto.CipherKind.aes_128_gcm, cfg.servers[0].method);
+    try std.testing.expectEqual(Mode.tcp_and_udp, cfg.servers[0].mode);
+    try std.testing.expectEqual(Mode.tcp_and_udp, cfg.locals[0].mode);
+    try std.testing.expectEqualStrings("fake-plugin", cfg.servers[0].plugin.?);
+    try std.testing.expectEqualStrings("obfs=tls", cfg.servers[0].plugin_opts.?);
+}
+
+test "apply CLI overrides to parsed config" {
+    var cfg = try Config.parseSlice(std.testing.allocator,
+        \\{
+        \\  "server": "127.0.0.1",
+        \\  "server_port": 8388,
+        \\  "local_address": "127.0.0.1",
+        \\  "local_port": 1080,
+        \\  "password": "secret",
+        \\  "method": "aes-256-gcm"
+        \\}
+    );
+    defer cfg.deinit();
+
+    try cfg.applyOverrides(.{
+        .server_host = "203.0.113.7",
+        .server_port = 8443,
+        .local_port = 1090,
+        .password = "override",
+        .method = .xchacha20_ietf_poly1305,
+        .mode = .udp_only,
+        .protocol = .redir,
+        .tcp_redir = .tproxy,
+    });
+
+    try std.testing.expectEqualStrings("203.0.113.7", cfg.servers[0].host);
+    try std.testing.expectEqual(@as(u16, 8443), cfg.servers[0].port);
+    try std.testing.expectEqualStrings("override", cfg.servers[0].password);
+    try std.testing.expectEqual(crypto.CipherKind.xchacha20_ietf_poly1305, cfg.servers[0].method);
+    try std.testing.expectEqual(Mode.udp_only, cfg.servers[0].mode);
+    try std.testing.expectEqual(@as(u16, 1090), cfg.locals[0].port);
+    try std.testing.expectEqual(LocalProtocol.redir, cfg.locals[0].protocol);
+    try std.testing.expectEqual(RedirType.tproxy, cfg.locals[0].tcp_redir);
 }
 
 test "reject non-aead legacy cipher methods" {

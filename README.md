@@ -48,10 +48,13 @@ Current state:
 - TCP `ss-server` path for supported ciphers.
 - UDP `ss-local` SOCKS5 UDP ASSOCIATE path for supported ciphers.
 - UDP `ss-server` path for supported ciphers.
-- Libev-style `ss-local`, `ss-server`, and `ss-manager` executable aliases
-  plus shadowsocks-rust-style `sslocal`, `ssserver`, and `ssmanager` aliases.
-  Alias names infer the process mode while explicit `--local`, `--server`,
-  `--manager`, and `--check` flags remain supported.
+- Libev-style `ss-local`, `ss-server`, `ss-manager`, `ss-redir`, and
+  `ss-tunnel` executable aliases plus shadowsocks-rust-style `sslocal`,
+  `ssserver`, and `ssmanager` aliases. Alias names infer the process mode
+  and local protocol while explicit `--local`, `--server`, `--manager`, and
+  `--check` flags remain supported. Common libev flags such as `-s`, `-p`,
+  `-b`, `-l`, `-k`, `-m`, `-u`, `-U`, `-L`, `--plugin`, `--plugin-opts`,
+  `--acl`, and `--manager-address` can build or override config at startup.
 - UDP association timeout and capacity controls via `udp_timeout` and
   `udp_max_associations`, matching shadowsocks-rust's global config names.
 - TCP SIP003 plugin process handling via `plugin`, `plugin_opts`,

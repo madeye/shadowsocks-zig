@@ -9,8 +9,11 @@ const usage =
     \\ss-local -c <config.json>
     \\ss-server -c <config.json>
     \\ss-manager -c <config.json>
+    \\ss-redir -s <server> -p <port> -k <password> -m <method> -l <local_port>
+    \\ss-tunnel -s <server> -p <port> -k <password> -m <method> -l <local_port> -L <target:port>
     \\
     \\Mode-specific executable names infer --local, --server, or --manager. Explicit mode flags override the executable-name default.
+    \\Common libev flags are accepted: -s, -p, -b, -l, -k, -m, -t, -u, -U, -L, --plugin, --plugin-opts, --acl, and --manager-address.
     \\--local runs TCP SOCKS5/SOCKS4/HTTP/DNS/Tunnel/Redir/Fake-DNS ss-local; --server runs TCP/UDP ss-server; --manager runs the manager control API.
     \\
 ;
@@ -25,6 +28,10 @@ pub fn main(init: std.process.Init) !void {
 
     var config_path: ?[]const u8 = null;
     var explicit_mode: ?shadowsocks.cli.Mode = null;
+    var overrides = shadowsocks.config.Overrides{
+        .protocol = shadowsocks.cli.defaultProtocolFromExecutablePath(executable_path),
+    };
+    var bind_host: ?[]const u8 = null;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-c") or std.mem.eql(u8, arg, "--config")) {
             config_path = args.next() orelse {
@@ -58,6 +65,48 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             try std.Io.File.stdout().writeStreamingAll(io, usage);
             return;
+        } else if (std.mem.eql(u8, arg, "-s")) {
+            try applyHostPortArg(args.next() orelse return invalidArgs(io), &overrides.server_host, &overrides.server_port);
+        } else if (std.mem.eql(u8, arg, "-p")) {
+            overrides.server_port = try parsePortArg(args.next() orelse return invalidArgs(io));
+        } else if (std.mem.eql(u8, arg, "-b")) {
+            bind_host = args.next() orelse return invalidArgs(io);
+        } else if (std.mem.eql(u8, arg, "-l")) {
+            overrides.local_port = try parsePortArg(args.next() orelse return invalidArgs(io));
+        } else if (std.mem.eql(u8, arg, "-k") or std.mem.eql(u8, arg, "--password")) {
+            overrides.password = args.next() orelse return invalidArgs(io);
+        } else if (std.mem.eql(u8, arg, "-m")) {
+            overrides.method = shadowsocks.crypto.CipherKind.parse(args.next() orelse return invalidArgs(io)) catch return error.InvalidCipher;
+        } else if (std.mem.eql(u8, arg, "-t")) {
+            overrides.timeout_seconds = try parseU64Arg(args.next() orelse return invalidArgs(io));
+        } else if (std.mem.eql(u8, arg, "-u")) {
+            overrides.mode = .tcp_and_udp;
+        } else if (std.mem.eql(u8, arg, "-U")) {
+            overrides.mode = .udp_only;
+        } else if (std.mem.eql(u8, arg, "-L")) {
+            overrides.protocol = .tunnel;
+            try applyHostPortArg(args.next() orelse return invalidArgs(io), &overrides.forward_host, &overrides.forward_port);
+        } else if (std.mem.eql(u8, arg, "-T")) {
+            overrides.protocol = .redir;
+            overrides.tcp_redir = .tproxy;
+        } else if (std.mem.eql(u8, arg, "--plugin")) {
+            overrides.plugin = args.next() orelse return invalidArgs(io);
+        } else if (std.mem.eql(u8, arg, "--plugin-opts")) {
+            overrides.plugin_opts = args.next() orelse return invalidArgs(io);
+        } else if (std.mem.eql(u8, arg, "--acl")) {
+            overrides.acl_path = args.next() orelse return invalidArgs(io);
+        } else if (std.mem.eql(u8, arg, "--manager-address")) {
+            overrides.manager_address = args.next() orelse return invalidArgs(io);
+        } else if (std.mem.eql(u8, arg, "--protocol")) {
+            overrides.protocol = try shadowsocks.config.LocalProtocol.parse(args.next() orelse return invalidArgs(io));
+        } else if (std.mem.eql(u8, arg, "--tcp-redir")) {
+            overrides.tcp_redir = try shadowsocks.config.RedirType.parse(args.next() orelse return invalidArgs(io), .not_supported);
+        } else if (std.mem.eql(u8, arg, "--udp-redir")) {
+            overrides.udp_redir = try shadowsocks.config.RedirType.parse(args.next() orelse return invalidArgs(io), .not_supported);
+        } else if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "-a") or std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--mtu")) {
+            _ = args.next() orelse return invalidArgs(io);
+        } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "-6") or std.mem.eql(u8, arg, "--fast-open") or std.mem.eql(u8, arg, "--no-delay") or std.mem.eql(u8, arg, "--reuse-port")) {
+            continue;
         } else {
             try std.Io.File.stderr().writeStreamingAll(io, usage);
             return error.InvalidArgs;
@@ -68,13 +117,26 @@ pub fn main(init: std.process.Init) !void {
         try std.Io.File.stderr().writeStreamingAll(io, usage);
         return error.InvalidArgs;
     };
-    if (config_path == null) {
+    if (bind_host) |host| {
+        if (mode == .server) {
+            overrides.server_host = host;
+        } else {
+            overrides.local_host = host;
+        }
+    }
+    if (mode == .local and overrides.protocol == null) overrides.protocol = .socks;
+
+    if (config_path == null and !overrides.hasAny()) {
         try std.Io.File.stderr().writeStreamingAll(io, usage);
         return error.InvalidArgs;
     }
 
-    var cfg = try shadowsocks.config.Config.parseFile(allocator, io, config_path.?);
+    var cfg = if (config_path) |path|
+        try shadowsocks.config.Config.parseFile(allocator, io, path)
+    else
+        try shadowsocks.config.Config.fromOverrides(allocator, overrides);
     defer cfg.deinit();
+    if (config_path != null) try cfg.applyOverrides(overrides);
 
     if (mode == .check) {
         var stdout_buf: [4096]u8 = undefined;
@@ -144,4 +206,47 @@ pub fn main(init: std.process.Init) !void {
     } else if (mode == .manager) {
         try shadowsocks.manager.run(allocator, io, init.environ_map, executable_path, &cfg);
     }
+}
+
+fn invalidArgs(io: std.Io) error{InvalidArgs} {
+    std.Io.File.stderr().writeStreamingAll(io, usage) catch {};
+    return error.InvalidArgs;
+}
+
+fn parsePortArg(text: []const u8) !u16 {
+    const port = std.fmt.parseInt(u16, text, 10) catch return error.InvalidArgs;
+    if (port == 0) return error.InvalidArgs;
+    return port;
+}
+
+fn parseU64Arg(text: []const u8) !u64 {
+    return std.fmt.parseInt(u64, text, 10) catch return error.InvalidArgs;
+}
+
+fn applyHostPortArg(text: []const u8, host: *?[]const u8, port: *?u16) !void {
+    if (text.len == 0) return error.InvalidArgs;
+    if (text[0] == '[') {
+        const close = std.mem.indexOfScalar(u8, text, ']') orelse return error.InvalidArgs;
+        if (close <= 1) return error.InvalidArgs;
+        host.* = text[1..close];
+        if (close + 1 < text.len) {
+            if (text[close + 1] != ':') return error.InvalidArgs;
+            port.* = try parsePortArg(text[close + 2 ..]);
+        }
+        return;
+    }
+
+    var colon_count: usize = 0;
+    for (text) |byte| {
+        if (byte == ':') colon_count += 1;
+    }
+    if (colon_count == 1) {
+        const colon = std.mem.indexOfScalar(u8, text, ':').?;
+        if (colon == 0 or colon + 1 >= text.len) return error.InvalidArgs;
+        host.* = text[0..colon];
+        port.* = try parsePortArg(text[colon + 1 ..]);
+        return;
+    }
+
+    host.* = text;
 }
