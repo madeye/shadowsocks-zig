@@ -259,12 +259,33 @@ pub fn bindUdpRedirListen(host: []const u8, port: u16, redir_type: config.RedirT
             return socket;
         },
         .pf => {
-            if (builtin.os.tag != .macos and builtin.os.tag != .ios) return error.RedirectionUnsupported;
-            var socket = try bindUdpAddress(address, .{
-                .disable_fragmentation = true,
-            });
-            socket.redir_type = redir_type;
-            return socket;
+            switch (builtin.os.tag) {
+                .macos, .ios => {
+                    var socket = try bindUdpAddress(address, .{
+                        .disable_fragmentation = true,
+                    });
+                    socket.redir_type = redir_type;
+                    return socket;
+                },
+                .freebsd => {
+                    var socket = try bindUdpAddress(address, .{
+                        .bind_any = true,
+                        .receive_original_destination = true,
+                        .disable_fragmentation = true,
+                    });
+                    socket.redir_type = redir_type;
+                    return socket;
+                },
+                .openbsd => {
+                    var socket = try bindUdpAddress(address, .{
+                        .bind_any = true,
+                        .receive_original_destination = true,
+                    });
+                    socket.redir_type = redir_type;
+                    return socket;
+                },
+                else => return error.RedirectionUnsupported,
+            }
         },
         else => error.RedirectionUnsupported,
     };
@@ -280,11 +301,24 @@ pub fn bindUdpRedirResponse(address: net.IpAddress, redir_type: config.RedirType
             });
         },
         .pf => {
-            if (builtin.os.tag != .macos and builtin.os.tag != .ios) return error.RedirectionUnsupported;
-            return try bindUdpAddress(address, .{
-                .disable_fragmentation = true,
-                .reuse_port = true,
-            });
+            return switch (builtin.os.tag) {
+                .macos, .ios => try bindUdpAddress(address, .{
+                    .disable_fragmentation = true,
+                    .reuse_port = true,
+                }),
+                .freebsd => try bindUdpAddress(address, .{
+                    .bind_any = true,
+                    .receive_original_destination = true,
+                    .disable_fragmentation = true,
+                    .reuse_port = true,
+                }),
+                .openbsd => try bindUdpAddress(address, .{
+                    .bind_any = true,
+                    .receive_original_destination = true,
+                    .reuse_port = true,
+                }),
+                else => error.RedirectionUnsupported,
+            };
         },
         else => error.RedirectionUnsupported,
     };
@@ -292,6 +326,7 @@ pub fn bindUdpRedirResponse(address: net.IpAddress, redir_type: config.RedirType
 
 const UdpBindOptions = struct {
     transparent: bool = false,
+    bind_any: bool = false,
     receive_original_destination: bool = false,
     reuse_port: bool = false,
     disable_fragmentation: bool = false,
@@ -302,6 +337,7 @@ fn bindUdpAddress(address: net.IpAddress, options: UdpBindOptions) !UdpSocket {
     const fd = try openPosixSocket(posixAddressFamily(address), std.posix.SOCK.DGRAM);
     errdefer closeFd(fd);
     if (options.transparent) try setIpTransparent(fd, address);
+    if (options.bind_any) try setUdpBindAny(fd, address);
     if (options.receive_original_destination) try setUdpOriginalDestinationOptions(fd, address);
     if (options.disable_fragmentation) try setUdpDisableFragmentation(fd, address);
     try setNonblocking(fd);
@@ -466,42 +502,75 @@ fn setIpTransparent(fd: std.posix.socket_t, address: net.IpAddress) !void {
 }
 
 fn setUdpOriginalDestinationOptions(fd: std.posix.socket_t, address: net.IpAddress) !void {
-    if (builtin.os.tag != .linux) return error.RedirectionUnsupported;
-
-    const SOL_IP: c_int = 0;
-    const SOL_IPV6: c_int = 41;
-    const IP_RECVORIGDSTADDR: u32 = 20;
-    const IPV6_RECVORIGDSTADDR: u32 = 74;
-    const IP_MTU_DISCOVER: u32 = 10;
-    const IPV6_MTU_DISCOVER: u32 = 23;
-    const IP_PMTUDISC_DO: c_int = 2;
-
-    const recv_opt = switch (address) {
-        .ip4 => .{ SOL_IP, IP_RECVORIGDSTADDR },
-        .ip6 => .{ SOL_IPV6, IPV6_RECVORIGDSTADDR },
+    const IPPROTO_IP: c_int = 0;
+    const IPPROTO_IPV6: c_int = 41;
+    const opt = switch (builtin.os.tag) {
+        .linux => switch (address) {
+            .ip4 => .{ IPPROTO_IP, @as(u32, 20) },
+            .ip6 => .{ IPPROTO_IPV6, @as(u32, 74) },
+        },
+        .freebsd => switch (address) {
+            .ip4 => .{ IPPROTO_IP, @as(u32, 27) },
+            .ip6 => .{ IPPROTO_IPV6, @as(u32, 72) },
+        },
+        .openbsd => switch (address) {
+            .ip4 => .{ IPPROTO_IP, @as(u32, 7) },
+            .ip6 => .{ IPPROTO_IPV6, @as(u32, 36) },
+        },
+        else => return error.RedirectionUnsupported,
     };
+
     var one: c_int = 1;
-    try std.posix.setsockopt(fd, recv_opt[0], recv_opt[1], std.mem.asBytes(&one));
+    try std.posix.setsockopt(fd, opt[0], opt[1], std.mem.asBytes(&one));
+
+    if (builtin.os.tag == .openbsd) {
+        const port_opt = switch (address) {
+            .ip4 => .{ IPPROTO_IP, @as(u32, 33) },
+            .ip6 => .{ IPPROTO_IPV6, @as(u32, 64) },
+        };
+        try std.posix.setsockopt(fd, port_opt[0], port_opt[1], std.mem.asBytes(&one));
+    }
+
+    if (builtin.os.tag != .linux) return;
 
     const mtu_opt = switch (address) {
-        .ip4 => .{ SOL_IP, IP_MTU_DISCOVER },
-        .ip6 => .{ SOL_IPV6, IPV6_MTU_DISCOVER },
+        .ip4 => .{ IPPROTO_IP, @as(u32, 10) },
+        .ip6 => .{ IPPROTO_IPV6, @as(u32, 23) },
     };
-    var pmtu: c_int = IP_PMTUDISC_DO;
+    var pmtu: c_int = 2;
     try std.posix.setsockopt(fd, mtu_opt[0], mtu_opt[1], std.mem.asBytes(&pmtu));
 }
 
-fn setUdpDisableFragmentation(fd: std.posix.socket_t, address: net.IpAddress) !void {
-    if (builtin.os.tag != .macos and builtin.os.tag != .ios) return error.RedirectionUnsupported;
-
+fn setUdpBindAny(fd: std.posix.socket_t, address: net.IpAddress) !void {
     const IPPROTO_IP: c_int = 0;
     const IPPROTO_IPV6: c_int = 41;
-    const IP_DONTFRAG: u32 = 67;
-    const IPV6_DONTFRAG: u32 = 62;
+    const SOL_SOCKET_BINDANY: u32 = 0x1000;
 
-    const opt = switch (address) {
-        .ip4 => .{ IPPROTO_IP, IP_DONTFRAG },
-        .ip6 => .{ IPPROTO_IPV6, IPV6_DONTFRAG },
+    const opt = switch (builtin.os.tag) {
+        .freebsd => switch (address) {
+            .ip4 => .{ IPPROTO_IP, @as(u32, 24) },
+            .ip6 => .{ IPPROTO_IPV6, @as(u32, 64) },
+        },
+        .openbsd => .{ std.posix.SOL.SOCKET, SOL_SOCKET_BINDANY },
+        else => return error.RedirectionUnsupported,
+    };
+    var one: c_int = 1;
+    try std.posix.setsockopt(fd, opt[0], opt[1], std.mem.asBytes(&one));
+}
+
+fn setUdpDisableFragmentation(fd: std.posix.socket_t, address: net.IpAddress) !void {
+    const IPPROTO_IP: c_int = 0;
+    const IPPROTO_IPV6: c_int = 41;
+    const opt = switch (builtin.os.tag) {
+        .macos, .ios => switch (address) {
+            .ip4 => .{ IPPROTO_IP, @as(u32, 67) },
+            .ip6 => .{ IPPROTO_IPV6, @as(u32, 62) },
+        },
+        .freebsd => switch (address) {
+            .ip4 => .{ IPPROTO_IP, @as(u32, 67) },
+            .ip6 => .{ IPPROTO_IPV6, @as(u32, 62) },
+        },
+        else => return error.RedirectionUnsupported,
     };
     var one: c_int = 1;
     std.posix.setsockopt(fd, opt[0], opt[1], std.mem.asBytes(&one)) catch |err| switch (err) {
@@ -697,11 +766,16 @@ fn recvUdpRedir(fd: std.posix.socket_t, redir_type: config.RedirType, out: []u8)
         };
     }
 
-    if (builtin.os.tag != .linux or redir_type != .tproxy) return error.RedirectionUnsupported;
+    const parser: OriginalDestinationParser = switch (builtin.os.tag) {
+        .linux => if (redir_type == .tproxy) .linux_tproxy else return error.RedirectionUnsupported,
+        .freebsd => if (redir_type == .pf) .freebsd_pf else return error.RedirectionUnsupported,
+        .openbsd => if (redir_type == .pf) .openbsd_pf else return error.RedirectionUnsupported,
+        else => return error.RedirectionUnsupported,
+    };
 
     var source: PosixAddress = undefined;
     var iov = std.posix.iovec{ .base = out.ptr, .len = out.len };
-    var control_buf: [128]u8 align(@alignOf(std.os.linux.cmsghdr)) = undefined;
+    var control_buf: [128]u8 align(@alignOf(std.c.cmsghdr)) = undefined;
     var msg = std.posix.msghdr{
         .name = &source.any,
         .namelen = @sizeOf(PosixAddress),
@@ -717,7 +791,7 @@ fn recvUdpRedir(fd: std.posix.socket_t, redir_type: config.RedirType, out: []u8)
         switch (std.posix.errno(rc)) {
             .SUCCESS => return .{
                 .from = try posixToIpAddress(&source),
-                .to = try originalDestinationFromControl(&msg),
+                .to = try originalDestinationFromControl(&msg, parser),
                 .len = @intCast(rc),
             },
             .INTR => continue,
@@ -730,28 +804,22 @@ fn recvUdpRedir(fd: std.posix.socket_t, redir_type: config.RedirType, out: []u8)
     }
 }
 
-fn originalDestinationFromControl(msg: *const std.posix.msghdr) !net.IpAddress {
-    const SOL_IP: c_int = 0;
-    const SOL_IPV6: c_int = 41;
-    const IP_RECVORIGDSTADDR: c_int = 20;
-    const IPV6_RECVORIGDSTADDR: c_int = 74;
+const OriginalDestinationParser = enum {
+    linux_tproxy,
+    freebsd_pf,
+    openbsd_pf,
+};
 
+fn originalDestinationFromControl(msg: *const std.posix.msghdr, parser: OriginalDestinationParser) !net.IpAddress {
     var current = firstControlMessage(msg);
     while (current) |cmsg| {
-        switch (cmsg.level) {
-            SOL_IP => if (cmsg.type == IP_RECVORIGDSTADDR) {
-                var storage: PosixAddress = undefined;
-                const data = controlMessageData(cmsg);
-                @memcpy(std.mem.asBytes(&storage.in), data[0..@sizeOf(std.posix.sockaddr.in)]);
-                return posixToIpAddress(&storage);
-            },
-            SOL_IPV6 => if (cmsg.type == IPV6_RECVORIGDSTADDR) {
-                var storage: PosixAddress = undefined;
-                const data = controlMessageData(cmsg);
-                @memcpy(std.mem.asBytes(&storage.in6), data[0..@sizeOf(std.posix.sockaddr.in6)]);
-                return posixToIpAddress(&storage);
-            },
-            else => {},
+        if (fullSockaddrOriginalDestination(cmsg, parser)) |address| {
+            return address;
+        } else |_| {}
+
+        if (parser == .openbsd_pf) {
+            if (openBsdSplitOriginalDestination(msg)) |address| return address else |_| {}
+            break;
         }
         current = nextControlMessage(msg, cmsg);
     }
@@ -759,25 +827,116 @@ fn originalDestinationFromControl(msg: *const std.posix.msghdr) !net.IpAddress {
     return error.RedirectionOriginalDestinationMissing;
 }
 
-fn firstControlMessage(msg: *const std.posix.msghdr) ?*std.os.linux.cmsghdr {
+fn fullSockaddrOriginalDestination(cmsg: *const std.c.cmsghdr, parser: OriginalDestinationParser) !net.IpAddress {
+    const IPPROTO_IP: c_int = 0;
+    const IPPROTO_IPV6: c_int = 41;
+    const types: struct { c_int, c_int } = switch (parser) {
+        .linux_tproxy => .{ @as(c_int, 20), @as(c_int, 74) },
+        .freebsd_pf => .{ @as(c_int, 27), @as(c_int, 72) },
+        .openbsd_pf => return error.RedirectionOriginalDestinationMissing,
+    };
+    const ipv4_type: c_int = types[0];
+    const ipv6_type: c_int = types[1];
+
+    switch (cmsg.level) {
+        IPPROTO_IP => if (cmsg.type == ipv4_type) {
+            var storage: PosixAddress = undefined;
+            const data = controlMessageData(cmsg);
+            if (data.len < @sizeOf(std.posix.sockaddr.in)) return error.RedirectionOriginalDestinationMissing;
+            @memcpy(std.mem.asBytes(&storage.in), data[0..@sizeOf(std.posix.sockaddr.in)]);
+            return posixToIpAddress(&storage);
+        },
+        IPPROTO_IPV6 => if (cmsg.type == ipv6_type) {
+            var storage: PosixAddress = undefined;
+            const data = controlMessageData(cmsg);
+            if (data.len < @sizeOf(std.posix.sockaddr.in6)) return error.RedirectionOriginalDestinationMissing;
+            @memcpy(std.mem.asBytes(&storage.in6), data[0..@sizeOf(std.posix.sockaddr.in6)]);
+            return posixToIpAddress(&storage);
+        },
+        else => {},
+    }
+    return error.RedirectionOriginalDestinationMissing;
+}
+
+fn openBsdSplitOriginalDestination(msg: *const std.posix.msghdr) !net.IpAddress {
+    const IPPROTO_IP: c_int = 0;
+    const IPPROTO_IPV6: c_int = 41;
+    const IP_RECVDSTADDR: c_int = 7;
+    const IP_RECVDSTPORT: c_int = 33;
+    const IPV6_PKTINFO: c_int = 46;
+    const IPV6_RECVDSTPORT: c_int = 64;
+
+    var ip4_addr: ?u32 = null;
+    var ip4_port: ?u16 = null;
+    var ip6_addr: ?[16]u8 = null;
+    var ip6_port: ?u16 = null;
+
+    var current = firstControlMessage(msg);
+    while (current) |cmsg| {
+        const data = controlMessageData(cmsg);
+        switch (cmsg.level) {
+            IPPROTO_IP => switch (cmsg.type) {
+                IP_RECVDSTADDR => {
+                    if (data.len >= 4) ip4_addr = std.mem.readInt(u32, data[0..4], .native);
+                },
+                IP_RECVDSTPORT => {
+                    if (data.len >= 2) ip4_port = std.mem.readInt(u16, data[0..2], .native);
+                },
+                else => {},
+            },
+            IPPROTO_IPV6 => switch (cmsg.type) {
+                IPV6_PKTINFO => if (data.len >= 16) {
+                    var addr: [16]u8 = undefined;
+                    @memcpy(&addr, data[0..16]);
+                    ip6_addr = addr;
+                },
+                IPV6_RECVDSTPORT => {
+                    if (data.len >= 2) ip6_port = std.mem.readInt(u16, data[0..2], .native);
+                },
+                else => {},
+            },
+            else => {},
+        }
+        current = nextControlMessage(msg, cmsg);
+    }
+
+    if (ip4_addr) |addr| {
+        if (ip4_port) |port| {
+            var storage: PosixAddress = undefined;
+            storage.in = .{ .addr = addr, .port = port };
+            return posixToIpAddress(&storage);
+        }
+    }
+    if (ip6_addr) |addr| {
+        if (ip6_port) |port| {
+            var storage: PosixAddress = undefined;
+            storage.in6 = .{ .addr = addr, .port = port, .flowinfo = 0, .scope_id = 0 };
+            return posixToIpAddress(&storage);
+        }
+    }
+    return error.RedirectionOriginalDestinationMissing;
+}
+
+fn firstControlMessage(msg: *const std.posix.msghdr) ?*std.c.cmsghdr {
     const control = msg.control orelse return null;
-    if (msg.controllen < @sizeOf(std.os.linux.cmsghdr)) return null;
+    if (msg.controllen < @sizeOf(std.c.cmsghdr)) return null;
     return @ptrCast(@alignCast(control));
 }
 
-fn nextControlMessage(msg: *const std.posix.msghdr, cmsg: *std.os.linux.cmsghdr) ?*std.os.linux.cmsghdr {
+fn nextControlMessage(msg: *const std.posix.msghdr, cmsg: *std.c.cmsghdr) ?*std.c.cmsghdr {
     const base_raw: [*]u8 = @ptrCast(msg.control orelse return null);
     const current_raw: [*]u8 = @ptrCast(cmsg);
     const current_offset = @intFromPtr(current_raw) - @intFromPtr(base_raw);
-    const next_offset = current_offset + controlMessageAlign(cmsg.len);
-    if (next_offset + @sizeOf(std.os.linux.cmsghdr) > msg.controllen) return null;
+    const next_offset = current_offset + controlMessageAlign(@intCast(cmsg.len));
+    if (next_offset + @sizeOf(std.c.cmsghdr) > msg.controllen) return null;
     return @ptrCast(@alignCast(base_raw + next_offset));
 }
 
-fn controlMessageData(cmsg: *const std.os.linux.cmsghdr) []const u8 {
+fn controlMessageData(cmsg: *const std.c.cmsghdr) []const u8 {
     const raw: [*]const u8 = @ptrCast(cmsg);
-    const offset = controlMessageAlign(@sizeOf(std.os.linux.cmsghdr));
-    const len = if (cmsg.len > offset) cmsg.len - offset else 0;
+    const offset = controlMessageAlign(@sizeOf(std.c.cmsghdr));
+    const cmsg_len: usize = @intCast(cmsg.len);
+    const len = if (cmsg_len > offset) cmsg_len - offset else 0;
     return raw[offset..][0..len];
 }
 
@@ -1212,4 +1371,54 @@ test "darwin pf UDP state parser recovers gateway destination" {
         std.mem.bigToNative(u16, peer_port_be),
     );
     try std.testing.expect(restored.eql(&.{ .ip4 = .{ .bytes = .{ 198, 51, 100, 7 }, .port = 53 } }));
+}
+
+test "FreeBSD UDP original destination parser reads sockaddr control message" {
+    var storage = ipAddressToPosix(.{ .ip4 = .{ .bytes = .{ 203, 0, 113, 10 }, .port = 5353 } });
+    var control_buf: [128]u8 align(@alignOf(std.c.cmsghdr)) = undefined;
+    const used = writeTestControlMessage(&control_buf, 0, 0, 27, std.mem.asBytes(&storage.in));
+    var msg = testControlMessage(&control_buf, used);
+
+    const restored = try originalDestinationFromControl(&msg, .freebsd_pf);
+    try std.testing.expect(restored.eql(&.{ .ip4 = .{ .bytes = .{ 203, 0, 113, 10 }, .port = 5353 } }));
+}
+
+test "OpenBSD UDP original destination parser combines split address and port control messages" {
+    var control_buf: [128]u8 align(@alignOf(std.c.cmsghdr)) = undefined;
+    const addr_bytes = [_]u8{ 198, 51, 100, 8 };
+    var port_bytes: [2]u8 = undefined;
+    std.mem.writeInt(u16, &port_bytes, 5354, .big);
+    var used = writeTestControlMessage(&control_buf, 0, 0, 7, &addr_bytes);
+    used = writeTestControlMessage(&control_buf, used, 0, 33, &port_bytes);
+    var msg = testControlMessage(&control_buf, used);
+
+    const restored = try originalDestinationFromControl(&msg, .openbsd_pf);
+    try std.testing.expect(restored.eql(&.{ .ip4 = .{ .bytes = .{ 198, 51, 100, 8 }, .port = 5354 } }));
+}
+
+fn writeTestControlMessage(buffer: []align(@alignOf(std.c.cmsghdr)) u8, offset: usize, level: c_int, cmsg_type: c_int, data: []const u8) usize {
+    const header_offset = controlMessageAlign(offset);
+    const data_offset = header_offset + controlMessageAlign(@sizeOf(std.c.cmsghdr));
+    const cmsg_len = data_offset - header_offset + data.len;
+    const header: *std.c.cmsghdr = @ptrCast(@alignCast(buffer[header_offset..].ptr));
+    header.* = .{
+        .len = @intCast(cmsg_len),
+        .level = level,
+        .type = cmsg_type,
+    };
+    @memcpy(buffer[data_offset..][0..data.len], data);
+    return header_offset + controlMessageAlign(cmsg_len);
+}
+
+fn testControlMessage(buffer: []align(@alignOf(std.c.cmsghdr)) u8, len: usize) std.posix.msghdr {
+    var iov = std.posix.iovec{ .base = buffer.ptr, .len = 0 };
+    return .{
+        .name = null,
+        .namelen = 0,
+        .iov = @ptrCast(&iov),
+        .iovlen = 1,
+        .control = buffer.ptr,
+        .controllen = @intCast(len),
+        .flags = 0,
+    };
 }

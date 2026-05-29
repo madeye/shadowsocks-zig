@@ -42,6 +42,12 @@ jobs:
       - name: Unit tests
         run: zig build test
 
+      - name: Target compile checks
+        run: |
+          zig test src/root.zig -target x86_64-linux-gnu -I src/deps -fno-emit-bin
+          zig test src/root.zig -target x86_64-freebsd -I src/deps -fno-emit-bin
+          zig test src/root.zig -target x86_64-openbsd -I src/deps -fno-emit-bin
+
       - name: Build
         run: zig build
 

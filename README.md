@@ -33,7 +33,8 @@ Current state:
   accepted socket local address, and TCP `ipfw` uses the socket local address
   on macOS/iOS/FreeBSD. UDP `pf` on macOS/iOS binds normal UDP sockets and
   recovers the original destination from `/dev/pf` state lookup. FreeBSD and
-  OpenBSD UDP redir remain pending.
+  OpenBSD UDP `pf` use `recvmsg` original-destination control messages with
+  the platform-specific bind-any socket options.
 - TCP and UDP DNS local mode via `protocol = "dns"` with
   `remote_dns_address`/`remote_dns_port` and optional
   `local_dns_address`/`local_dns_port`. DNS locals default to
@@ -252,6 +253,6 @@ Latest libuv/Zig 0.16 smoke checks:
 
 Remaining high-level port work:
 
-- Remaining specialized local protocol work from shadowsocks-rust/libev:
-  FreeBSD/OpenBSD UDP redir, full BSD/macOS pf/ipfw integration tests with
-  kernel rules, tun interfaces, and RocksDB-compatible fake-DNS storage.
+- Remaining specialized local protocol work from shadowsocks-rust/libev: full
+  BSD/macOS pf/ipfw integration tests with kernel rules, tun interfaces, and
+  RocksDB-compatible fake-DNS storage.

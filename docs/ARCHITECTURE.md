@@ -129,8 +129,10 @@ OpenBSD `pf` uses the accepted socket local address, and `ipfw` uses the
 accepted socket local address on macOS/iOS/FreeBSD. For macOS/iOS UDP `pf`,
 the listener receives from a normal UDP socket and then scans `/dev/pf`
 `DIOCGETSTATES` state records to recover the original gateway destination,
-matching shadowsocks-rust's PacketFilter lookup strategy. FreeBSD/OpenBSD UDP
-redir remains future work.
+matching shadowsocks-rust's PacketFilter lookup strategy. FreeBSD UDP `pf`
+uses `IP_BINDANY`, `IP_RECVORIGDSTADDR`, and `IPV6_RECVORIGDSTADDR`; OpenBSD
+UDP `pf` uses `SO_BINDANY`, `IP_RECVDSTADDR`/`IP_RECVDSTPORT`, and
+`IPV6_PKTINFO`/`IPV6_RECVDSTPORT`.
 
 Fake-DNS local support follows shadowsocks-rust's `protocol = "fake-dns"`
 configuration keys for IPv4/IPv6 pools, database path, and record expiration.
