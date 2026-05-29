@@ -32,6 +32,7 @@ pub const LocalProtocol = enum {
     redir,
     dns,
     fake_dns,
+    tun,
 
     pub fn parse(value: ?[]const u8) ConfigError!LocalProtocol {
         const v = value orelse return .socks;
@@ -41,6 +42,7 @@ pub const LocalProtocol = enum {
         if (std.ascii.eqlIgnoreCase(v, "redir")) return .redir;
         if (std.ascii.eqlIgnoreCase(v, "dns")) return .dns;
         if (std.ascii.eqlIgnoreCase(v, "fake-dns") or std.ascii.eqlIgnoreCase(v, "fake_dns")) return .fake_dns;
+        if (std.ascii.eqlIgnoreCase(v, "tun")) return .tun;
         return error.InvalidProtocol;
     }
 
@@ -126,6 +128,10 @@ pub const Local = struct {
     fake_dns_ipv6_network: ?[]const u8,
     fake_dns_database_path: ?[]const u8,
     fake_dns_record_expire_duration: u64,
+    tun_interface_name: ?[]const u8,
+    tun_interface_address: ?[]const u8,
+    tun_interface_destination: ?[]const u8,
+    tun_device_fd_from_path: ?[]const u8,
     acl_path: ?[]const u8,
     socks5_users: []const Socks5User,
 };
@@ -275,6 +281,10 @@ pub const Config = struct {
             .fake_dns_ipv6_network = try dupOptionalNonEmptyString(allocator, object.get("fake_dns_ipv6_network") orelse root.get("fake_dns_ipv6_network")),
             .fake_dns_database_path = try dupOptionalNonEmptyString(allocator, object.get("fake_dns_database_path") orelse root.get("fake_dns_database_path")),
             .fake_dns_record_expire_duration = asU64(object.get("fake_dns_record_expire_duration") orelse root.get("fake_dns_record_expire_duration")) orelse 10,
+            .tun_interface_name = try dupOptionalNonEmptyString(allocator, object.get("tun_interface_name") orelse root.get("tun_interface_name")),
+            .tun_interface_address = try dupOptionalIpNetString(allocator, object.get("tun_interface_address") orelse root.get("tun_interface_address")),
+            .tun_interface_destination = try dupOptionalIpNetString(allocator, object.get("tun_interface_destination") orelse root.get("tun_interface_destination")),
+            .tun_device_fd_from_path = try dupOptionalNonEmptyString(allocator, object.get("tun_device_fd_from_path") orelse root.get("tun_device_fd_from_path")),
             .acl_path = try dupOptionalNonEmptyString(allocator, object.get("acl") orelse root.get("acl")),
             .socks5_users = try parseSocks5Users(
                 allocator,
@@ -413,6 +423,25 @@ fn dupOptionalNonEmptyString(allocator: std.mem.Allocator, value: ?std.json.Valu
     const s = asString(value) orelse return null;
     if (s.len == 0) return null;
     return try allocator.dupe(u8, s);
+}
+
+fn dupOptionalIpNetString(allocator: std.mem.Allocator, value: ?std.json.Value) ConfigError!?[]const u8 {
+    const s = asString(value) orelse return null;
+    if (s.len == 0) return null;
+    try validateIpNet(s);
+    return try allocator.dupe(u8, s);
+}
+
+fn validateIpNet(value: []const u8) ConfigError!void {
+    const slash = std.mem.lastIndexOfScalar(u8, value, '/') orelse return error.InvalidConfig;
+    if (slash == 0 or slash + 1 >= value.len) return error.InvalidConfig;
+
+    const address = value[0..slash];
+    const prefix = std.fmt.parseInt(u8, value[slash + 1 ..], 10) catch return error.InvalidConfig;
+    _ = std.Io.net.IpAddress.parse(address, 0) catch return error.InvalidConfig;
+
+    const max_prefix: u8 = if (std.mem.indexOfScalar(u8, address, ':') != null) 128 else 32;
+    if (prefix > max_prefix) return error.InvalidConfig;
 }
 
 fn parseStringArray(allocator: std.mem.Allocator, value: ?std.json.Value) ConfigError![]const []const u8 {
@@ -673,6 +702,37 @@ test "parse fake-dns local defaults" {
     try std.testing.expectEqual(@as(u64, 30), cfg.locals[0].fake_dns_record_expire_duration);
 }
 
+test "parse tun local interface options without local address" {
+    var cfg = try Config.parseSlice(std.testing.allocator,
+        \\{
+        \\  "server": "127.0.0.1",
+        \\  "server_port": 8388,
+        \\  "password": "secret",
+        \\  "method": "aes-256-gcm",
+        \\  "locals": [
+        \\    {
+        \\      "protocol": "tun",
+        \\      "mode": "tcp_and_udp",
+        \\      "tun_interface_name": "tun0",
+        \\      "tun_interface_address": "10.255.0.1/24",
+        \\      "tun_interface_destination": "10.255.0.2/24",
+        \\      "tun_device_fd_from_path": "/tmp/ss-zig-tun-fd.sock"
+        \\    }
+        \\  ]
+        \\}
+    );
+    defer cfg.deinit();
+
+    try std.testing.expectEqual(LocalProtocol.tun, cfg.locals[0].protocol);
+    try std.testing.expectEqual(Mode.tcp_and_udp, cfg.locals[0].mode);
+    try std.testing.expectEqualStrings("127.0.0.1", cfg.locals[0].host);
+    try std.testing.expectEqual(@as(u16, 1080), cfg.locals[0].port);
+    try std.testing.expectEqualStrings("tun0", cfg.locals[0].tun_interface_name.?);
+    try std.testing.expectEqualStrings("10.255.0.1/24", cfg.locals[0].tun_interface_address.?);
+    try std.testing.expectEqualStrings("10.255.0.2/24", cfg.locals[0].tun_interface_destination.?);
+    try std.testing.expectEqualStrings("/tmp/ss-zig-tun-fd.sock", cfg.locals[0].tun_device_fd_from_path.?);
+}
+
 test "parse redir local defaults and explicit transparent proxy types" {
     var cfg = try Config.parseSlice(std.testing.allocator,
         \\{
@@ -721,6 +781,19 @@ test "parse rejects invalid redir type" {
         \\  "method": "aes-256-gcm",
         \\  "protocol": "redir",
         \\  "tcp_redir": "iptables"
+        \\}
+    ));
+}
+
+test "parse rejects invalid tun interface network" {
+    try std.testing.expectError(error.InvalidConfig, Config.parseSlice(std.testing.allocator,
+        \\{
+        \\  "server": "127.0.0.1",
+        \\  "server_port": 8388,
+        \\  "password": "secret",
+        \\  "method": "aes-256-gcm",
+        \\  "protocol": "tun",
+        \\  "tun_interface_address": "10.255.0.1/129"
         \\}
     ));
 }

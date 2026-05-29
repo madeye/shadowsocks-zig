@@ -47,6 +47,12 @@ Current state:
   mapped fake IP targets back to domains in SOCKS/HTTP local paths. Default
   builds keep the existing JSON fallback; `zig build -Drocksdb=true` enables
   the shadowsocks-rust-compatible RocksDB/BSON key layout.
+- Tun local config compatibility via `protocol = "tun"` with
+  `tun_interface_name`, `tun_interface_address`,
+  `tun_interface_destination`, and `tun_device_fd_from_path`. The relay layer
+  now has an explicit tun dispatch path, but the virtual TCP/IP packet stack is
+  still remaining work and runtime tun startup returns a specific
+  not-yet-implemented error.
 - TCP `ss-server` path for supported ciphers.
 - UDP `ss-local` SOCKS5 UDP ASSOCIATE path for supported ciphers.
 - UDP `ss-server` path for supported ciphers.
@@ -256,5 +262,6 @@ Latest libuv/Zig 0.16 smoke checks:
 
 Remaining high-level port work:
 
-- Remaining specialized local protocol work from shadowsocks-rust/libev: full
-  BSD/macOS pf/ipfw integration tests with kernel rules and tun interfaces.
+- Remaining specialized local protocol work from shadowsocks-rust/libev:
+  virtual TCP/IP forwarding for tun local mode, plus full BSD/macOS pf/ipfw
+  integration tests with kernel rules and tun interfaces.
