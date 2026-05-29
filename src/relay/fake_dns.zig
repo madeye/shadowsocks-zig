@@ -126,7 +126,7 @@ const RocksDbStore = struct {
         const path_z = try std.heap.smp_allocator.dupeZ(u8, path);
         defer std.heap.smp_allocator.free(path_z);
 
-        var err: ?[*:0]u8 = null;
+        var err: [*c]u8 = null;
         const opts = rocksdb.rocksdb_options_create();
         defer rocksdb.rocksdb_options_destroy(opts);
         rocksdb.rocksdb_options_set_create_if_missing(opts, 1);
@@ -141,7 +141,7 @@ const RocksDbStore = struct {
         const path_z = try std.heap.smp_allocator.dupeZ(u8, path);
         defer std.heap.smp_allocator.free(path_z);
 
-        var err: ?[*:0]u8 = null;
+        var err: [*c]u8 = null;
         const opts = rocksdb.rocksdb_options_create();
         defer rocksdb.rocksdb_options_destroy(opts);
         rocksdb.rocksdb_destroy_db(opts, path_z.ptr, &err);
@@ -158,7 +158,7 @@ const RocksDbStore = struct {
 
     fn get(self: *RocksDbStore, allocator: std.mem.Allocator, key: []const u8) FakeDnsError!?[]u8 {
         if (!build_options.rocksdb) return error.RocksDbNotEnabled;
-        var err: ?[*:0]u8 = null;
+        var err: [*c]u8 = null;
         var len: usize = 0;
         const value = rocksdb.rocksdb_get(@ptrCast(self.db.?), @ptrCast(self.read_options.?), key.ptr, key.len, &len, &err);
         try checkRocksDbError(err);
@@ -171,7 +171,7 @@ const RocksDbStore = struct {
 
     fn put(self: *RocksDbStore, key: []const u8, value: []const u8) FakeDnsError!void {
         if (!build_options.rocksdb) return error.RocksDbNotEnabled;
-        var err: ?[*:0]u8 = null;
+        var err: [*c]u8 = null;
         rocksdb.rocksdb_put(@ptrCast(self.db.?), @ptrCast(self.write_options.?), key.ptr, key.len, value.ptr, value.len, &err);
         try checkRocksDbError(err);
     }
@@ -214,10 +214,10 @@ const RocksDbIterator = struct {
     }
 };
 
-fn checkRocksDbError(err: ?[*:0]u8) FakeDnsError!void {
+fn checkRocksDbError(err: [*c]u8) FakeDnsError!void {
     if (!build_options.rocksdb) return;
-    if (err) |message| {
-        defer rocksdb.rocksdb_free(message);
+    if (err != null) {
+        defer rocksdb.rocksdb_free(err);
         return error.RocksDbError;
     }
 }
