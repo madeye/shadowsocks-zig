@@ -346,6 +346,14 @@ pub const Config = struct {
         } else if (root.get("shadowsocks")) |svrs| {
             if (svrs != .array) return error.InvalidConfig;
             for (svrs.array.items) |item| try servers.append(a, try parseServer(a, item, root));
+        } else if (root.get("port_password")) |_| {
+            try appendPortPasswordServers(a, &servers, root);
+        } else if (root.get("server")) |server_value| {
+            if (server_value == .array) {
+                try appendClassicServerArray(a, &servers, server_value, root);
+            } else {
+                try servers.append(a, try parseServer(a, value, root));
+            }
         } else {
             try servers.append(a, try parseServer(a, value, root));
         }
@@ -373,16 +381,27 @@ pub const Config = struct {
     fn parseServer(allocator: std.mem.Allocator, value: std.json.Value, root: std.json.ObjectMap) ConfigError!Server {
         if (value != .object) return error.InvalidConfig;
         const object = value.object;
-        const host = try dupString(allocator, object.get("server") orelse root.get("server") orelse return error.MissingServer);
-        const port: u16 = @intCast(asU64(object.get("server_port") orelse root.get("server_port") orelse return error.MissingServerPort) orelse return error.MissingServerPort);
-        const password = try dupString(allocator, object.get("password") orelse root.get("password") orelse return error.MissingPassword);
+        const default_port = parseRequiredPort(object.get("server_port") orelse root.get("server_port")) orelse return error.MissingServerPort;
+        const address = try parseServerAddress(asString(object.get("server") orelse root.get("server")) orelse return error.MissingServer, default_port);
+        const password = asString(object.get("password") orelse root.get("password")) orelse return error.MissingPassword;
+        return try parseServerResolved(allocator, object, root, address.host, address.port, password);
+    }
+
+    fn parseServerResolved(
+        allocator: std.mem.Allocator,
+        object: std.json.ObjectMap,
+        root: std.json.ObjectMap,
+        host: []const u8,
+        port: u16,
+        password: []const u8,
+    ) ConfigError!Server {
         const method_name = asString(object.get("method") orelse root.get("method")) orelse "aes-256-gcm";
         const method = crypto.CipherKind.parse(method_name) catch return error.InvalidCipher;
         const mode = Mode.parse(asString(object.get("mode") orelse root.get("mode")));
         return .{
-            .host = host,
+            .host = try allocator.dupe(u8, host),
             .port = port,
-            .password = password,
+            .password = try allocator.dupe(u8, password),
             .method = method,
             .mode = mode,
             .tcp_weight = try parseWeight(object.get("tcp_weight") orelse root.get("tcp_weight")),
@@ -437,6 +456,86 @@ fn parseLocalMode(protocol: LocalProtocol, value: ?[]const u8) Mode {
         .dns, .fake_dns => .tcp_and_udp,
         else => .tcp_only,
     };
+}
+
+fn appendClassicServerArray(
+    allocator: std.mem.Allocator,
+    servers: *std.ArrayList(Server),
+    server_value: std.json.Value,
+    root: std.json.ObjectMap,
+) ConfigError!void {
+    if (server_value != .array) return error.InvalidConfig;
+    const default_port = parseRequiredPort(root.get("server_port")) orelse return error.MissingServerPort;
+    const password = asString(root.get("password")) orelse return error.MissingPassword;
+    for (server_value.array.items) |item| {
+        const address = try parseServerAddress(asString(item) orelse return error.InvalidConfig, default_port);
+        try servers.append(allocator, try Config.parseServerResolved(allocator, root, root, address.host, address.port, password));
+    }
+}
+
+fn appendPortPasswordServers(
+    allocator: std.mem.Allocator,
+    servers: *std.ArrayList(Server),
+    root: std.json.ObjectMap,
+) ConfigError!void {
+    const port_password = root.get("port_password") orelse return error.InvalidConfig;
+    if (port_password != .object) return error.InvalidConfig;
+
+    const host = try firstClassicServerHost(root);
+    var iterator = port_password.object.iterator();
+    while (iterator.next()) |entry| {
+        const port = try parsePortText(entry.key_ptr.*);
+        const password = asString(entry.value_ptr.*) orelse return error.InvalidConfig;
+        try servers.append(allocator, try Config.parseServerResolved(allocator, root, root, host, port, password));
+    }
+}
+
+fn firstClassicServerHost(root: std.json.ObjectMap) ConfigError![]const u8 {
+    const server_value = root.get("server") orelse return "0.0.0.0";
+    if (server_value == .array) {
+        if (server_value.array.items.len == 0) return "0.0.0.0";
+        const address = try parseServerAddress(asString(server_value.array.items[0]) orelse return error.InvalidConfig, 1);
+        return address.host;
+    }
+    const address = try parseServerAddress(asString(server_value) orelse return error.InvalidConfig, 1);
+    return address.host;
+}
+
+fn parseRequiredPort(value: ?std.json.Value) ?u16 {
+    const raw = asU64(value) orelse return null;
+    if (raw == 0 or raw > std.math.maxInt(u16)) return null;
+    return @intCast(raw);
+}
+
+fn parsePortText(text: []const u8) ConfigError!u16 {
+    if (text.len == 0) return error.InvalidConfig;
+    const port = std.fmt.parseInt(u16, text, 10) catch return error.InvalidConfig;
+    if (port == 0) return error.InvalidConfig;
+    return port;
+}
+
+fn parseServerAddress(address: []const u8, default_port: u16) ConfigError!HostPort {
+    if (address.len == 0) return error.InvalidConfig;
+    if (address[0] == '[') {
+        const close = std.mem.indexOfScalar(u8, address, ']') orelse return error.InvalidConfig;
+        if (close <= 1) return error.InvalidConfig;
+        if (close + 1 == address.len) return .{ .host = address[1..close], .port = default_port };
+        if (address[close + 1] != ':') return error.InvalidConfig;
+        return .{ .host = address[1..close], .port = try parsePortText(address[close + 2 ..]) };
+    }
+
+    var colon_count: usize = 0;
+    for (address) |byte| {
+        if (byte == ':') colon_count += 1;
+    }
+    if (colon_count == 1) {
+        const colon = std.mem.indexOfScalar(u8, address, ':').?;
+        if (colon == 0) return error.InvalidConfig;
+        if (colon + 1 == address.len) return .{ .host = address[0..colon], .port = default_port };
+        return .{ .host = address[0..colon], .port = try parsePortText(address[colon + 1 ..]) };
+    }
+
+    return .{ .host = address, .port = default_port };
 }
 
 fn parseForwardHost(allocator: std.mem.Allocator, object: std.json.ObjectMap, root: std.json.ObjectMap) ConfigError!?[]const u8 {
@@ -747,6 +846,96 @@ test "apply CLI overrides to parsed config" {
     try std.testing.expectEqual(@as(u16, 1090), cfg.locals[0].port);
     try std.testing.expectEqual(LocalProtocol.redir, cfg.locals[0].protocol);
     try std.testing.expectEqual(RedirType.tproxy, cfg.locals[0].tcp_redir);
+}
+
+test "parse libev classic server array" {
+    var cfg = try Config.parseSlice(std.testing.allocator,
+        \\{
+        \\  "server": ["one.example", "two.example:8443", "[2001:db8::1]:9443", "2001:db8::2"],
+        \\  "server_port": 8388,
+        \\  "password": "secret",
+        \\  "method": "aes-128-gcm",
+        \\  "mode": "tcp_and_udp"
+        \\}
+    );
+    defer cfg.deinit();
+
+    try std.testing.expectEqual(@as(usize, 4), cfg.servers.len);
+    try std.testing.expectEqualStrings("one.example", cfg.servers[0].host);
+    try std.testing.expectEqual(@as(u16, 8388), cfg.servers[0].port);
+    try std.testing.expectEqualStrings("two.example", cfg.servers[1].host);
+    try std.testing.expectEqual(@as(u16, 8443), cfg.servers[1].port);
+    try std.testing.expectEqualStrings("2001:db8::1", cfg.servers[2].host);
+    try std.testing.expectEqual(@as(u16, 9443), cfg.servers[2].port);
+    try std.testing.expectEqualStrings("2001:db8::2", cfg.servers[3].host);
+    try std.testing.expectEqual(@as(u16, 8388), cfg.servers[3].port);
+    try std.testing.expectEqualStrings("secret", cfg.servers[3].password);
+    try std.testing.expectEqual(crypto.CipherKind.aes_128_gcm, cfg.servers[3].method);
+    try std.testing.expectEqual(Mode.tcp_and_udp, cfg.servers[3].mode);
+}
+
+test "parse libev port_password entries" {
+    var cfg = try Config.parseSlice(std.testing.allocator,
+        \\{
+        \\  "server": "127.0.0.1",
+        \\  "port_password": {
+        \\    "8388": "first",
+        \\    "8389": "second"
+        \\  },
+        \\  "method": "aes-256-gcm",
+        \\  "manager_address": "127.0.0.1:6001"
+        \\}
+    );
+    defer cfg.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), cfg.servers.len);
+    try std.testing.expectEqualStrings("127.0.0.1", cfg.servers[0].host);
+    try std.testing.expectEqual(@as(u16, 8388), cfg.servers[0].port);
+    try std.testing.expectEqualStrings("first", cfg.servers[0].password);
+    try std.testing.expectEqual(@as(u16, 8389), cfg.servers[1].port);
+    try std.testing.expectEqualStrings("second", cfg.servers[1].password);
+    try std.testing.expectEqual(crypto.CipherKind.aes_256_gcm, cfg.servers[1].method);
+    try std.testing.expectEqualStrings("127.0.0.1", cfg.manager.?.host);
+}
+
+test "parse libev port_password defaults host for manager configs" {
+    var cfg = try Config.parseSlice(std.testing.allocator,
+        \\{
+        \\  "port_password": {
+        \\    "8388": "first"
+        \\  },
+        \\  "method": "aes-256-gcm",
+        \\  "manager_address": "127.0.0.1:6001"
+        \\}
+    );
+    defer cfg.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), cfg.servers.len);
+    try std.testing.expectEqualStrings("0.0.0.0", cfg.servers[0].host);
+    try std.testing.expectEqual(@as(u16, 8388), cfg.servers[0].port);
+    try std.testing.expectEqualStrings("first", cfg.servers[0].password);
+}
+
+test "parse rejects invalid libev port_password entries" {
+    try std.testing.expectError(error.InvalidConfig, Config.parseSlice(std.testing.allocator,
+        \\{
+        \\  "server": "127.0.0.1",
+        \\  "port_password": {
+        \\    "not-a-port": "first"
+        \\  },
+        \\  "method": "aes-256-gcm"
+        \\}
+    ));
+
+    try std.testing.expectError(error.InvalidConfig, Config.parseSlice(std.testing.allocator,
+        \\{
+        \\  "server": "127.0.0.1",
+        \\  "port_password": {
+        \\    "8388": 123
+        \\  },
+        \\  "method": "aes-256-gcm"
+        \\}
+    ));
 }
 
 test "reject non-aead legacy cipher methods" {
