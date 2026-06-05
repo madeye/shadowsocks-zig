@@ -65,7 +65,7 @@ fn selectServer(server_cfgs: []const config.Server, next_index: *std.atomic.Valu
             .udp => if (server_cfg.mode.enableUdp()) return server_cfg,
         }
     }
-    return error.UnsupportedCipher;
+    return error.MissingServer;
 }
 
 fn buildLocalServerSet(
@@ -90,7 +90,6 @@ fn buildLocalServerSet(
     }
 
     for (servers, 0..) |server_cfg, i| {
-        if (!server_cfg.method.isImplemented()) return error.UnsupportedCipher;
         var tcp_server_cfg = server_cfg;
         var udp_server_cfg = server_cfg;
         if (server_cfg.plugin) |plugin_name| {
@@ -143,9 +142,6 @@ fn appendWeightedServer(
 
 pub fn runServer(allocator: std.mem.Allocator, io: std.Io, env_map: *const std.process.Environ.Map, cfg: *const config.Config) !void {
     if (cfg.servers.len == 0) return error.MissingServer;
-    for (cfg.servers) |server_cfg| {
-        if (!server_cfg.method.isImplemented()) return error.UnsupportedCipher;
-    }
 
     if (cfg.servers.len == 1) {
         return try runServerInstance(allocator, io, env_map, cfg.servers[0], cfg.manager, cfg.udp_timeout_seconds, cfg.udp_max_associations);
@@ -168,7 +164,6 @@ fn runServerInstance(
     udp_timeout_seconds: u64,
     udp_max_associations: ?usize,
 ) !void {
-    if (!server_cfg.method.isImplemented()) return error.UnsupportedCipher;
     var replay_protector = replay.ReplayProtector.init(allocator, 500_000);
     defer replay_protector.deinit();
     var traffic_counter = traffic.Counter{};
@@ -973,8 +968,8 @@ fn serverConnection(
     try readExact(client, req_salt[0..server_cfg.method.saltLen()]);
     var inbound = try crypto.TcpCipher.init(server_cfg.method, master[0..server_cfg.method.keyLen()], req_salt[0..server_cfg.method.saltLen()]);
     const first_packet = try readEncryptedChunk(allocator, client, &inbound);
-    if (try replay_protector.checkAndSet(req_salt[0..server_cfg.method.saltLen()])) return error.RepeatedNonce;
     defer allocator.free(first_packet);
+    if (try replay_protector.checkAndSet(req_salt[0..server_cfg.method.saltLen()])) return error.RepeatedNonce;
     const parsed = try ss_address.Address.read(first_packet);
     if (outboundBlocked(access_control, io, parsed.address)) return error.OutboundBlockedByAcl;
 
@@ -1216,56 +1211,27 @@ fn pipeServerEncryptedToPlain(
 ) void {
     var src = src_stream;
     var dst = dst_stream;
+    defer dst.shutdown();
     var salt: [32]u8 = undefined;
-    readExact(&src, salt[0..method.saltLen()]) catch {
-        dst.close();
-        return;
-    };
-    var cipher = crypto.TcpCipher.init(method, master_key[0..method.keyLen()], salt[0..method.saltLen()]) catch {
-        dst.close();
-        return;
-    };
+    readExact(&src, salt[0..method.saltLen()]) catch return;
+    var cipher = crypto.TcpCipher.init(method, master_key[0..method.keyLen()], salt[0..method.saltLen()]) catch return;
     if (method.category() == .aead2022) {
         const header_len = 1 + 8 + method.saltLen() + 2 + method.tagLen();
-        const sealed_header = allocator.alloc(u8, header_len) catch {
-            dst.close();
-            return;
-        };
+        const sealed_header = allocator.alloc(u8, header_len) catch return;
         defer allocator.free(sealed_header);
-        readExact(&src, sealed_header) catch {
-            dst.close();
-            return;
-        };
+        readExact(&src, sealed_header) catch return;
         const header = switch (cipher) {
-            .aead2022 => |*c| c.decryptHeader(allocator, sealed_header, .server, method.saltLen()) catch {
-                dst.close();
-                return;
-            },
+            .aead2022 => |*c| c.decryptHeader(allocator, sealed_header, .server, method.saltLen()) catch return,
             else => unreachable,
         };
         defer if (header.request_salt) |value| allocator.free(value);
-        if (!validAead2022Timestamp(header.timestamp)) {
-            dst.close();
-            return;
-        }
-        const sealed_payload = allocator.alloc(u8, header.data_len + method.tagLen()) catch {
-            dst.close();
-            return;
-        };
+        if (!validAead2022Timestamp(header.timestamp)) return;
+        const sealed_payload = allocator.alloc(u8, header.data_len + method.tagLen()) catch return;
         defer allocator.free(sealed_payload);
-        readExact(&src, sealed_payload) catch {
-            dst.close();
-            return;
-        };
-        const plain = cipher.decryptPayload(allocator, sealed_payload, header.data_len) catch {
-            dst.close();
-            return;
-        };
+        readExact(&src, sealed_payload) catch return;
+        const plain = cipher.decryptPayload(allocator, sealed_payload, header.data_len) catch return;
         defer allocator.free(plain);
-        if (plain.len != 0) dst.writeAll(plain) catch {
-            dst.close();
-            return;
-        };
+        if (plain.len != 0) dst.writeAll(plain) catch return;
     }
     pipeEncryptedToPlain(allocator, src, dst, &cipher, null);
 }
@@ -1273,7 +1239,7 @@ fn pipeServerEncryptedToPlain(
 fn pipeEncryptedToPlain(allocator: std.mem.Allocator, src_stream: netio.TcpStream, dst_stream: netio.TcpStream, cipher: *crypto.TcpCipher, traffic_counter: ?*traffic.Counter) void {
     var src = src_stream;
     var dst = dst_stream;
-    defer dst.close();
+    defer dst.shutdown();
     while (true) {
         const plain = readEncryptedChunk(allocator, &src, cipher) catch return;
         defer allocator.free(plain);
@@ -1290,6 +1256,7 @@ fn pipePlainToEncrypted(allocator: std.mem.Allocator, src_stream: netio.TcpStrea
 fn pipePlainToEncryptedCounted(allocator: std.mem.Allocator, src_stream: netio.TcpStream, dst_stream: netio.TcpStream, cipher: *crypto.TcpCipher, traffic_counter: ?*traffic.Counter) !void {
     var src = src_stream;
     var dst = dst_stream;
+    defer dst.shutdown();
     var buf: [max_aead_packet_size]u8 = undefined;
     while (true) {
         const n = try src.read(&buf);
@@ -1302,7 +1269,7 @@ fn pipePlainToEncryptedCounted(allocator: std.mem.Allocator, src_stream: netio.T
 fn pipePlainToPlain(src_stream: netio.TcpStream, dst_stream: netio.TcpStream) !void {
     var src = src_stream;
     var dst = dst_stream;
-    defer dst.close();
+    defer dst.shutdown();
     var buf: [max_aead_packet_size]u8 = undefined;
     while (true) {
         const n = try src.read(&buf);

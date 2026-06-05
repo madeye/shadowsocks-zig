@@ -91,8 +91,13 @@ pub fn runLocal(
                 .timeout_ns = timeoutNs(udp_timeout_seconds),
                 .last_seen_ns = .init(nowNs(io)),
             };
+            errdefer {
+                assoc.server_replay.deinit();
+                allocator.destroy(assoc);
+            }
             try crypto.deriveMasterKeyWithRawKey(server_cfg.method, server_cfg.password, server_cfg.key, assoc.master_key[0..server_cfg.method.keyLen()]);
             try associations.put(key, assoc);
+            errdefer _ = associations.remove(key);
 
             const thread = try std.Thread.spawn(.{}, localResponseLoop, .{assoc});
             thread.detach();
@@ -163,8 +168,13 @@ pub fn runLocalRedir(
                 .timeout_ns = timeoutNs(udp_timeout_seconds),
                 .last_seen_ns = .init(nowNs(io)),
             };
+            errdefer {
+                assoc.server_replay.deinit();
+                allocator.destroy(assoc);
+            }
             try crypto.deriveMasterKeyWithRawKey(server_cfg.method, server_cfg.password, server_cfg.key, assoc.master_key[0..server_cfg.method.keyLen()]);
             try associations.put(key, assoc);
+            errdefer _ = associations.remove(key);
 
             const thread = try std.Thread.spawn(.{}, localResponseLoop, .{assoc});
             thread.detach();
@@ -251,8 +261,13 @@ pub fn runLocalTunnel(
                 .timeout_ns = timeoutNs(udp_timeout_seconds),
                 .last_seen_ns = .init(nowNs(io)),
             };
+            errdefer {
+                assoc.server_replay.deinit();
+                allocator.destroy(assoc);
+            }
             try crypto.deriveMasterKeyWithRawKey(server_cfg.method, server_cfg.password, server_cfg.key, assoc.master_key[0..server_cfg.method.keyLen()]);
             try associations.put(key, assoc);
+            errdefer _ = associations.remove(key);
 
             const thread = try std.Thread.spawn(.{}, localResponseLoop, .{assoc});
             thread.detach();
@@ -326,8 +341,13 @@ pub fn runDnsLocal(
                 .timeout_ns = timeoutNs(udp_timeout_seconds),
                 .last_seen_ns = .init(nowNs(io)),
             };
+            errdefer {
+                assoc.server_replay.deinit();
+                allocator.destroy(assoc);
+            }
             try crypto.deriveMasterKeyWithRawKey(server_cfg.method, server_cfg.password, server_cfg.key, assoc.master_key[0..server_cfg.method.keyLen()]);
             try associations.put(key, assoc);
+            errdefer _ = associations.remove(key);
 
             const thread = try std.Thread.spawn(.{}, localResponseLoop, .{assoc});
             thread.detach();
@@ -351,7 +371,7 @@ fn selectUdpServer(server_cfgs: []const config.Server, next_index: *std.atomic.V
         const server_cfg = server_cfgs[index];
         if (server_cfg.mode.enableUdp()) return server_cfg;
     }
-    return error.UnsupportedCipher;
+    return error.MissingServer;
 }
 
 fn directUdpQuery(local_socket: *netio.UdpSocket, packet: []const u8, client_addr: netio.net.IpAddress, target_address: ss_address.Address, ipv6_first: bool) !void {

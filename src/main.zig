@@ -170,7 +170,7 @@ pub fn main(init: std.process.Init) !void {
         const stdout = &stdout_file.interface;
         try stdout.print("config ok: {d} server(s), {d} local listener(s)\n", .{ cfg.servers.len, cfg.locals.len });
         for (cfg.servers) |server_cfg| {
-            try stdout.print("server {s}:{d} method={s} mode={s} tcp_weight={d}/{d} udp_weight={d}/{d} implemented={}\n", .{
+            try stdout.print("server {s}:{d} method={s} mode={s} tcp_weight={d}/{d} udp_weight={d}/{d}\n", .{
                 server_cfg.host,
                 server_cfg.port,
                 server_cfg.method.name(),
@@ -179,7 +179,6 @@ pub fn main(init: std.process.Init) !void {
                 shadowsocks.config.server_weight_scale,
                 server_cfg.udp_weight,
                 shadowsocks.config.server_weight_scale,
-                server_cfg.method.isImplemented(),
             });
             if (server_cfg.plugin) |plugin_name| {
                 try stdout.print("  plugin={s} plugin_mode={s}\n", .{ plugin_name, @tagName(server_cfg.plugin_mode) });
