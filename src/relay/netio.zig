@@ -49,6 +49,10 @@ pub const TcpStream = struct {
         closeFd(self.fd);
     }
 
+    pub fn shutdown(self: *const TcpStream) void {
+        _ = std.posix.system.shutdown(self.fd, std.posix.SHUT.RDWR);
+    }
+
     pub fn peerAddress(self: *const TcpStream) !net.IpAddress {
         return try socketPeerAddress(self.fd);
     }

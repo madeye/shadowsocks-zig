@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const config = @import("config.zig");
+const crypto = @import("crypto.zig");
 const netio = @import("relay/netio.zig");
 
 const max_datagram = 8192;
@@ -198,10 +199,12 @@ pub const Manager = struct {
             try self.allocator.dupe(u8, "");
         errdefer self.allocator.free(password);
 
-        const method = if (object.get("method")) |method_value|
-            try dupeJsonString(self.allocator, method_value)
+        const method_name = if (object.get("method")) |method_value|
+            jsonString(method_value) orelse return error.InvalidCommand
         else
-            try self.allocator.dupe(u8, self.default_method);
+            self.default_method;
+        const method_kind = crypto.CipherKind.parse(method_name) catch return error.InvalidCommand;
+        const method = try self.allocator.dupe(u8, method_kind.name());
         errdefer self.allocator.free(method);
 
         const host = try self.allocator.dupe(u8, self.default_host);
@@ -220,7 +223,7 @@ pub const Manager = struct {
             .password = password,
             .key = key,
             .method = method,
-            .mode = config.Mode.parse(jsonString(object.get("mode")) orelse @tagName(self.default_mode)),
+            .mode = config.Mode.parse(jsonString(object.get("mode")) orelse @tagName(self.default_mode)) catch return error.InvalidCommand,
             .no_delay = jsonBool(object.get("no_delay")) orelse false,
             .reuse_port = jsonBool(object.get("reuse_port")) orelse false,
             .ipv6_first = jsonBool(object.get("ipv6_first")) orelse false,
@@ -358,6 +361,28 @@ pub const Manager = struct {
             }
             try appendTcpBuffersCompact(&out, self.allocator, entry.tcp_buffers);
             try appendOutboundBindCompact(&out, self.allocator, entry.outbound_bind);
+            try out.appendSlice(self.allocator, ",\"mode\":");
+            try appendJsonString(&out, self.allocator, @tagName(entry.mode));
+            if (entry.acl_path) |acl_path| {
+                try out.appendSlice(self.allocator, ",\"acl\":");
+                try appendJsonString(&out, self.allocator, acl_path);
+            }
+            if (entry.plugin) |plugin| {
+                try out.appendSlice(self.allocator, ",\"plugin\":");
+                try appendJsonString(&out, self.allocator, plugin);
+            }
+            if (entry.plugin_opts) |plugin_opts| {
+                try out.appendSlice(self.allocator, ",\"plugin_opts\":");
+                try appendJsonString(&out, self.allocator, plugin_opts);
+            }
+            if (entry.plugin_args.len != 0) {
+                try out.appendSlice(self.allocator, ",\"plugin_args\":");
+                try appendJsonStringArray(&out, self.allocator, entry.plugin_args);
+            }
+            if (entry.plugin != null) {
+                try out.appendSlice(self.allocator, ",\"plugin_mode\":");
+                try appendJsonString(&out, self.allocator, @tagName(entry.plugin_mode));
+            }
             try out.appendSlice(self.allocator, "},");
         }
         if (self.entries.items.len > 0) {
@@ -524,6 +549,10 @@ fn dupeOutboundBind(allocator: std.mem.Allocator, value: config.OutboundBindConf
 
 fn parseEntryOutboundBind(allocator: std.mem.Allocator, object: std.json.ObjectMap) !config.OutboundBindConfig {
     var bind = config.OutboundBindConfig{};
+    errdefer {
+        if (bind.ipv4) |s| allocator.free(s);
+        if (bind.ipv6) |s| allocator.free(s);
+    }
     if (jsonString(object.get("local_address"))) |host| try assignEntryOutboundBind(allocator, &bind, host);
     if (jsonString(object.get("local_ipv4_address"))) |host| try assignEntryOutboundBind(allocator, &bind, host);
     if (jsonString(object.get("local_ipv6_address"))) |host| try assignEntryOutboundBind(allocator, &bind, host);
@@ -879,6 +908,10 @@ test "manager command table supports add list stat ping remove" {
     try std.testing.expectEqualStrings("ok", add);
     try std.testing.expectEqual(@as(usize, 1), mgr.entries.items[1].plugin_args.len);
     try std.testing.expectEqualStrings("--client", mgr.entries.items[1].plugin_args[0]);
+
+    try std.testing.expectError(error.InvalidCommand, mgr.processCommand("add: {\"server_port\":8391,\"password\":\"next\",\"method\":\"none\"}"));
+    try std.testing.expectError(error.InvalidCommand, mgr.processCommand("add: {\"server_port\":8391,\"password\":\"next\",\"method\":\"aes-256-cfb\"}"));
+    try std.testing.expectEqual(@as(usize, 2), mgr.entries.items.len);
 
     try std.testing.expect((try mgr.processCommand("stat: {\"8390\":42}")) == null);
     const ping = (try mgr.processCommand("ping")).?;

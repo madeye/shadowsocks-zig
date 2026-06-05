@@ -104,12 +104,6 @@ pub const CipherKind = enum {
             => 16,
         };
     }
-
-    pub fn isImplemented(self: CipherKind) bool {
-        return switch (self.category()) {
-            .aead, .aead2022 => true,
-        };
-    }
 };
 
 pub fn deriveKey(password: []const u8, out: []u8) void {
@@ -904,7 +898,6 @@ test "cipher names parse rust/libev strings" {
     try std.testing.expectEqual(CipherKind.chacha20_ietf_poly1305, try CipherKind.parse("chacha20-ietf-poly1305"));
     try std.testing.expectEqual(CipherKind.xchacha20_ietf_poly1305, try CipherKind.parse("xchacha20-ietf-poly1305"));
     try std.testing.expectEqualStrings("2022-blake3-aes-256-gcm", CipherKind.aead2022_blake3_aes_256_gcm.name());
-    try std.testing.expect(CipherKind.xchacha20_ietf_poly1305.isImplemented());
     try std.testing.expectEqual(CipherCategory.aead, CipherKind.xchacha20_ietf_poly1305.category());
     try std.testing.expectEqual(@as(usize, 32), CipherKind.xchacha20_ietf_poly1305.saltLen());
     try std.testing.expectEqual(@as(usize, 24), CipherKind.xchacha20_ietf_poly1305.nonceLen());

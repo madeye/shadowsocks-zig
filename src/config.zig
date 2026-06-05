@@ -9,11 +9,12 @@ pub const Mode = enum {
     tcp_and_udp,
     udp_only,
 
-    pub fn parse(value: ?[]const u8) Mode {
+    pub fn parse(value: ?[]const u8) ConfigError!Mode {
         const v = value orelse return .tcp_only;
-        if (std.mem.eql(u8, v, "tcp_and_udp")) return .tcp_and_udp;
-        if (std.mem.eql(u8, v, "udp_only")) return .udp_only;
-        return .tcp_only;
+        if (std.ascii.eqlIgnoreCase(v, "tcp_only")) return .tcp_only;
+        if (std.ascii.eqlIgnoreCase(v, "tcp_and_udp")) return .tcp_and_udp;
+        if (std.ascii.eqlIgnoreCase(v, "udp_only")) return .udp_only;
+        return error.InvalidMode;
     }
 
     pub fn enableTcp(self: Mode) bool {
@@ -302,7 +303,7 @@ pub const Config = struct {
         }
         const a = arena.allocator();
         const protocol = overrides.protocol orelse .socks;
-        const mode = overrides.mode orelse parseLocalMode(protocol, null);
+        const mode = overrides.mode orelse try parseLocalMode(protocol, null);
         const timeout = overrides.timeout_seconds orelse 300;
         const server_host = overrides.server_host orelse return error.MissingServer;
         const server_port = overrides.server_port orelse return error.MissingServerPort;
@@ -510,7 +511,7 @@ pub const Config = struct {
     ) ConfigError!Server {
         const method_name = asString(object.get("method") orelse root.get("method")) orelse "aes-256-gcm";
         const method = crypto.CipherKind.parse(method_name) catch return error.InvalidCipher;
-        const mode = Mode.parse(asString(object.get("mode") orelse root.get("mode")));
+        const mode = try Mode.parse(asString(object.get("mode") orelse root.get("mode")));
         return .{
             .host = try allocator.dupe(u8, host),
             .port = port,
@@ -529,7 +530,7 @@ pub const Config = struct {
             .plugin = try dupOptionalNonEmptyString(allocator, object.get("plugin") orelse root.get("plugin")),
             .plugin_opts = try dupOptionalNonEmptyString(allocator, object.get("plugin_opts") orelse root.get("plugin_opts")),
             .plugin_args = try parseStringArray(allocator, object.get("plugin_args") orelse root.get("plugin_args")),
-            .plugin_mode = Mode.parse(asString(object.get("plugin_mode") orelse root.get("plugin_mode"))),
+            .plugin_mode = try Mode.parse(asString(object.get("plugin_mode") orelse root.get("plugin_mode"))),
         };
     }
 
@@ -549,7 +550,7 @@ pub const Config = struct {
             .port = @intCast(asU64(object.get("local_port") orelse root.get("local_port") orelse std.json.Value{ .integer = 1080 }) orelse 1080),
             .udp_host = if (local_udp_port != null) try dupOptionalNonEmptyString(allocator, object.get("local_udp_address") orelse root.get("local_udp_address")) else null,
             .udp_port = local_udp_port,
-            .mode = parseLocalMode(protocol, asString(object.get("mode") orelse root.get("mode"))),
+            .mode = try parseLocalMode(protocol, asString(object.get("mode") orelse root.get("mode"))),
             .protocol = protocol,
             .tcp_redir = try RedirType.parse(asString(object.get("tcp_redir") orelse root.get("tcp_redir")), RedirType.tcpDefault()),
             .udp_redir = try RedirType.parse(asString(object.get("udp_redir") orelse root.get("udp_redir")), RedirType.udpDefault()),
@@ -576,8 +577,8 @@ pub const Config = struct {
     }
 };
 
-fn parseLocalMode(protocol: LocalProtocol, value: ?[]const u8) Mode {
-    if (value) |v| return Mode.parse(v);
+fn parseLocalMode(protocol: LocalProtocol, value: ?[]const u8) ConfigError!Mode {
+    if (value) |v| return try Mode.parse(v);
     return switch (protocol) {
         .dns, .fake_dns => .tcp_and_udp,
         else => .tcp_only,
@@ -776,7 +777,7 @@ fn assignOutboundBindHost(allocator: std.mem.Allocator, bind: *OutboundBindConfi
             .ip4 => bind.ipv4 = try allocator.dupe(u8, host),
             .ip6 => bind.ipv6 = try allocator.dupe(u8, host),
         }
-    } else |_| {}
+    } else |_| return error.InvalidOutboundBind;
 }
 
 fn parseManager(allocator: std.mem.Allocator, root: std.json.ObjectMap) ConfigError!?Manager {
@@ -1377,7 +1378,7 @@ test "parse shadowsocks-rust extended servers/locals config" {
     var cfg = try Config.parseSlice(std.testing.allocator,
         \\{
         \\  "servers": [
-        \\    {"disabled": true, "server": "disabled.example", "server_port": 1, "method": "none"},
+        \\    {"disabled": true, "server": "disabled.example", "server_port": 1},
         \\    {"server": "one.example", "server_port": 8388, "password": "one", "method": "aes-128-gcm", "tcp_weight": 0.25, "udp_weight": 0},
         \\    {"server": "two.example", "server_port": 8389, "password": "two", "method": "chacha20-ietf-poly1305", "tcp_weight": 1.0, "udp_weight": 0.5}
         \\  ],
